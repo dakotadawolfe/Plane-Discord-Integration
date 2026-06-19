@@ -1,0 +1,17 @@
+services:
+  project-desk:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: file:/data/project-desk.db
+      NODE_ENV: production
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    volumes:
+      - project-desk-data:/data
+    restart: unless-stopped
+
+volumes:
+  project-desk-data:

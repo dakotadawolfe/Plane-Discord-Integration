@@ -1,0 +1,35 @@
+{
+  "name": "project-desk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hostable Discord mini app for Plane-backed requests.",
+  "type": "module",
+  "workspaces": [
+    "apps/server",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,green \"npm run dev -w @project-desk/server\" \"npm run dev -w @project-desk/web\"",
+    "build": "npm run build -ws",
+    "typecheck": "npm run typecheck -ws",
+    "start": "npm run start -w @project-desk/server",
+    "lint": "npm run typecheck",
+    "discord:entrypoint": "npm run register-entrypoint -w @project-desk/server",
+    "discord:pin-launch": "npm run pin-launch -w @project-desk/server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "@discordjs/rest": {
+      "undici": "6.27.0"
+    },
+    "discord.js": {
+      "undici": "6.27.0"
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
