@@ -5,22 +5,52 @@ import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import type { AiWorker } from "./ai-worker.js";
 import { config } from "./config.js";
-import type { CommentRecord, RequestRecord } from "./db.js";
+import type { CommentRecord, RequestRecord, WorkCommentRecord, WorkItemRecord } from "./db.js";
 import {
+  getWorkItemById,
+  getWorkCommentById,
   getRequestById,
+  insertActivityEvent,
+  insertDecision,
+  insertNotification,
+  insertWorkComment,
+  insertWorkItem,
   insertComment,
   insertRequest,
+  listActivityEvents,
+  listDecisions,
+  listNotificationsForUser,
+  listKnownPeople,
   listLocalComments,
+  listWorkComments,
+  listWorkItemsByParent,
+  listWorkItemsForUser,
   listRecentRequests,
   listRequestsForUser,
-  updateCommentPlaneId
+  listBoardWorkItems,
+  updateWorkItemStage,
+  updateCommentPlaneId,
+  updateNotificationStatus
 } from "./db.js";
 import type { SessionUser } from "./domain.js";
-import { requestPriorities, requestTypes } from "./domain.js";
+import {
+  aiJobTypes,
+  isArchivedStage,
+  requestPriorities,
+  requestTypes,
+  stageDefinition,
+  workItemKinds,
+  workStages,
+  workStageDefinitions,
+  type WorkStage
+} from "./domain.js";
 import { DiscordService } from "./discord.js";
+import { addEventClient, emitProjectDeskEvent } from "./events.js";
 import { stripHtml } from "./html.js";
 import { captureRawBody, handleDiscordInteraction } from "./interactions.js";
+import { runInactiveArchiveSweep } from "./maintenance.js";
 import { PlaneApiError, type PlaneComment, type PlaneLikeClient, type PlaneWorkItem } from "./plane.js";
 
 interface AppSession {
@@ -33,6 +63,7 @@ interface AppSession {
 interface CreateAppServices {
   plane: PlaneLikeClient;
   discord: DiscordService;
+  aiWorker: AiWorker;
 }
 
 const createRequestSchema = z.object({
@@ -43,7 +74,8 @@ const createRequestSchema = z.object({
 });
 
 const createCommentSchema = z.object({
-  body: z.string().trim().min(1).max(3000)
+  body: z.string().trim().min(1).max(3000),
+  parentCommentId: z.string().uuid().optional().nullable()
 });
 
 const activityAuthSchema = z.object({
@@ -52,6 +84,24 @@ const activityAuthSchema = z.object({
 
 const updateBoardItemStateSchema = z.object({
   stateId: z.string().trim().min(1)
+});
+
+const createWorkItemSchema = z.object({
+  title: z.string().trim().min(3).max(160),
+  details: z.string().trim().min(10).max(5000),
+  kind: z.enum(workItemKinds).optional().default("idea"),
+  priority: z.enum(requestPriorities).optional().default("medium"),
+  parentId: z.string().uuid().optional().nullable()
+});
+
+const updateWorkItemStageSchema = z.object({
+  stage: z.enum(workStages),
+  rationale: z.string().trim().max(1000).optional()
+});
+
+const enqueueAiJobSchema = z.object({
+  type: z.enum(aiJobTypes),
+  reason: z.string().trim().max(500).optional()
 });
 
 function getSession(req: Request): AppSession {
@@ -144,6 +194,109 @@ function toRequestSummary(record: RequestRecord, workItem?: PlaneWorkItem | null
   };
 }
 
+function stageStatus(stage: WorkStage) {
+  const definition = stageDefinition(stage);
+  return {
+    id: definition.id,
+    name: definition.name,
+    group: definition.group,
+    color: definition.color
+  };
+}
+
+function promoteKindForStage(record: WorkItemRecord, stage: WorkStage) {
+  if (record.kind === "idea" && ["planning", "active", "reviewing", "done"].includes(stage)) {
+    return "project" as const;
+  }
+
+  return record.kind;
+}
+
+function canAccessWorkItem(user: SessionUser, record: WorkItemRecord): boolean {
+  return (
+    user.isAdmin ||
+    record.createdByDiscordUserId === user.id ||
+    record.ownerDiscordUserId === user.id
+  );
+}
+
+function toWorkItemSummary(record: WorkItemRecord) {
+  return {
+    id: record.id,
+    kind: record.kind,
+    parentId: record.parentId,
+    title: record.title,
+    details: record.details,
+    priority: record.priority,
+    stage: record.stage,
+    status: stageStatus(record.stage),
+    owner: record.ownerDiscordUserId
+      ? {
+          discordUserId: record.ownerDiscordUserId,
+          displayName: record.ownerDiscordUsername ?? "Assigned"
+        }
+      : null,
+    createdBy: {
+      discordUserId: record.createdByDiscordUserId,
+      displayName: record.createdByDiscordUsername
+    },
+    plane: {
+      issueId: record.planeIssueId,
+      sequenceId: record.planeSequenceId,
+      identifier: record.planeIdentifier,
+      url: record.planeUrl
+    },
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt
+  };
+}
+
+function toWorkCommentApi(comment: WorkCommentRecord) {
+  return {
+    id: comment.id,
+    parentCommentId: comment.parentCommentId,
+    authorName: comment.discordUsername,
+    authorType: comment.authorType,
+    avatarUrl: comment.discordAvatarUrl,
+    body: comment.body,
+    createdAt: comment.createdAt,
+    source: comment.authorType === "ai" ? "ai" : "local"
+  };
+}
+
+async function hydratePeopleProfiles(discord: DiscordService) {
+  const people = listKnownPeople();
+
+  return Promise.all(
+    people.map(async (person) => {
+      if (person.avatarUrl) {
+        return person;
+      }
+
+      const profile = await discord.fetchUserProfile(person.discordUserId);
+
+      return {
+        ...person,
+        displayName: profile?.displayName ?? person.displayName,
+        avatarUrl: profile?.avatarUrl ?? person.avatarUrl
+      };
+    })
+  );
+}
+
+function toLocalBoardItem(record: WorkItemRecord) {
+  return {
+    id: record.id,
+    title: record.title,
+    kind: record.kind,
+    priority: record.priority,
+    sequenceId: record.planeSequenceId,
+    identifier: record.planeIdentifier,
+    url: record.planeUrl,
+    status: stageStatus(record.stage)
+  };
+}
+
 function toBoardItem(workItem: PlaneWorkItem) {
   return {
     id: workItem.id,
@@ -186,6 +339,127 @@ function combineComments(planeComments: PlaneComment[], localComments: CommentRe
   ];
 
   return comments.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+interface MentionRecipient {
+  discordUserId: string;
+  displayName: string;
+}
+
+function normalizeMentionName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function mentionsAi(body: string): boolean {
+  return /(^|[\s.,;:!?()[\]{}])@ai\b/i.test(body);
+}
+
+function notificationBodyPreview(body: string): string {
+  return body
+    .replace(/\[@([^\]]+)\]\(mention:[^)]+\)/g, "@$1")
+    .replace(/\[(@?[^\]]+)\]\(work-item:[^)]+\)/g, "$1");
+}
+
+function collectKnownParticipants(record: WorkItemRecord, comments: WorkCommentRecord[]): MentionRecipient[] {
+  const recipients = new Map<string, MentionRecipient>();
+
+  recipients.set(record.createdByDiscordUserId, {
+    discordUserId: record.createdByDiscordUserId,
+    displayName: record.createdByDiscordUsername
+  });
+
+  if (record.ownerDiscordUserId) {
+    recipients.set(record.ownerDiscordUserId, {
+      discordUserId: record.ownerDiscordUserId,
+      displayName: record.ownerDiscordUsername ?? "Owner"
+    });
+  }
+
+  for (const comment of comments) {
+    if (comment.discordUserId && comment.authorType === "user") {
+      recipients.set(comment.discordUserId, {
+        discordUserId: comment.discordUserId,
+        displayName: comment.discordUsername
+      });
+    }
+  }
+
+  return [...recipients.values()];
+}
+
+function findMentionRecipients(body: string, record: WorkItemRecord, comments: WorkCommentRecord[]): MentionRecipient[] {
+  const discordIds = new Set<string>();
+  const tokenMentions = new Set<string>();
+  const recipients = new Map<string, MentionRecipient>();
+  const peopleById = new Map<string, MentionRecipient>();
+  const participants = collectKnownParticipants(record, comments);
+  const discordMentionPattern = /<@!?([A-Za-z0-9]+)>/g;
+  const markdownMentionPattern = /\[@[^\]]+\]\(mention:([^)]+)\)/g;
+  const tokenPattern = /(^|[\s.,;:!?()[\]{}])@([A-Za-z0-9_.-]+)/g;
+  let match: RegExpExecArray | null;
+
+  for (const person of [...listKnownPeople(), ...participants]) {
+    peopleById.set(person.discordUserId, person);
+  }
+
+  while ((match = discordMentionPattern.exec(body))) {
+    discordIds.add(match[1]);
+  }
+
+  while ((match = markdownMentionPattern.exec(body))) {
+    discordIds.add(match[1]);
+  }
+
+  while ((match = tokenPattern.exec(body))) {
+    tokenMentions.add(normalizeMentionName(match[2]));
+  }
+
+  if (tokenMentions.has("owner") && record.ownerDiscordUserId) {
+    recipients.set(record.ownerDiscordUserId, {
+      discordUserId: record.ownerDiscordUserId,
+      displayName: record.ownerDiscordUsername ?? "Owner"
+    });
+  }
+
+  if (tokenMentions.has("creator")) {
+    recipients.set(record.createdByDiscordUserId, {
+      discordUserId: record.createdByDiscordUserId,
+      displayName: record.createdByDiscordUsername
+    });
+  }
+
+  for (const participant of [...peopleById.values()]) {
+    if (discordIds.has(participant.discordUserId)) {
+      recipients.set(participant.discordUserId, participant);
+    }
+  }
+
+  return [...recipients.values()];
+}
+
+async function sendRecordedDm(
+  discord: DiscordService,
+  input: {
+    workItemId: string;
+    discordUserId: string;
+    type: string;
+    body: string;
+  }
+): Promise<void> {
+  const notification = insertNotification({
+    id: crypto.randomUUID(),
+    workItemId: input.workItemId,
+    discordUserId: input.discordUserId,
+    type: input.type,
+    channel: "dm",
+    body: input.body,
+    status: "pending",
+    reason: null
+  });
+  const result = await discord.sendDm(input.discordUserId, input.body);
+
+  updateNotificationStatus(notification.id, result.sent ? "sent" : "failed", result.reason ?? null);
+  emitProjectDeskEvent({ type: "notifications_changed" });
 }
 
 interface DiscordTokenResponse {
@@ -288,7 +562,7 @@ async function attachWorkItems(records: RequestRecord[], plane: PlaneLikeClient)
   );
 }
 
-export function createApp({ plane, discord }: CreateAppServices) {
+export function createApp({ plane, discord, aiWorker }: CreateAppServices) {
   const app = express();
   const __dirname = dirname(fileURLToPath(import.meta.url));
   const webDistDir = process.env.WEB_DIST_DIR ?? resolve(__dirname, "../../web/dist");
@@ -387,8 +661,257 @@ export function createApp({ plane, discord }: CreateAppServices) {
     res.json({
       authenticated: Boolean(user),
       user,
-      planeFullBoardUrl: user?.isAdmin ? config.plane.fullBoardUrl : null
+      planeFullBoardUrl: user?.isAdmin ? config.plane.fullBoardUrl : null,
+      aiProvider: config.ai.provider,
+      dmFirst: !config.discord.publicChannelPosting
     });
+  });
+
+  api.get("/events", requireAuth, (req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+
+    const cleanup = addEventClient(res);
+    req.on("close", cleanup);
+  });
+
+  api.get("/work-items", requireAuth, (req, res) => {
+    const user = getSession(req).user!;
+    runInactiveArchiveSweep();
+    const records = listWorkItemsForUser(user.id, user.isAdmin);
+    res.json({ items: records.map(toWorkItemSummary) });
+  });
+
+  api.get("/people", requireAuth, async (_req, res) => {
+    res.json({ people: await hydratePeopleProfiles(discord) });
+  });
+
+  api.post("/work-items", requireAuth, (req, res) => {
+    const user = getSession(req).user!;
+    const input = createWorkItemSchema.parse(req.body);
+    const item = insertWorkItem({
+      id: crypto.randomUUID(),
+      kind: input.kind,
+      parentId: input.parentId ?? null,
+      createdByDiscordUserId: user.id,
+      createdByDiscordUsername: user.displayName,
+      ownerDiscordUserId: user.id,
+      ownerDiscordUsername: user.displayName,
+      title: input.title,
+      details: input.details,
+      priority: input.priority,
+      stage: input.kind === "task" ? "active" : "inbox",
+      planeIssueId: null,
+      planeSequenceId: null,
+      planeIdentifier: null,
+      planeUrl: null
+    });
+
+    insertActivityEvent({
+      id: crypto.randomUUID(),
+      workItemId: item.id,
+      type: "created",
+      actorName: user.displayName,
+      body: `Created ${item.kind}.`,
+      metadataJson: null
+    });
+
+    emitProjectDeskEvent({ type: "work_items_changed" });
+    emitProjectDeskEvent({ type: "work_item_changed", workItemId: item.id });
+
+    res.status(201).json({
+      item: toWorkItemSummary(item)
+    });
+  });
+
+  api.get("/work-items/:id", requireAuth, (req, res) => {
+    const user = getSession(req).user!;
+    const workItemId = routeParam(req.params.id);
+    runInactiveArchiveSweep();
+    const record = workItemId ? getWorkItemById(workItemId) : null;
+
+    if (!record || !canAccessWorkItem(user, record)) {
+      res.status(404).json({ error: "Work item not found." });
+      return;
+    }
+
+    res.json({
+      item: {
+        ...toWorkItemSummary(record),
+        canOpenInPlane: user.isAdmin && Boolean(record.planeUrl)
+      },
+      comments: listWorkComments(record.id).map(toWorkCommentApi),
+      decisions: listDecisions(record.id),
+      activity: listActivityEvents(record.id),
+      childItems: listWorkItemsByParent(record.id).map(toWorkItemSummary)
+    });
+  });
+
+  api.post("/work-items/:id/comments", requireAuth, async (req, res) => {
+    const user = getSession(req).user!;
+    const workItemId = routeParam(req.params.id);
+    const record = workItemId ? getWorkItemById(workItemId) : null;
+
+    if (!record || !canAccessWorkItem(user, record)) {
+      res.status(404).json({ error: "Work item not found." });
+      return;
+    }
+
+    const input = createCommentSchema.parse(req.body);
+    const existingComments = listWorkComments(record.id);
+    const parentComment = input.parentCommentId ? getWorkCommentById(input.parentCommentId) : null;
+
+    if (input.parentCommentId && (!parentComment || parentComment.workItemId !== record.id)) {
+      res.status(400).json({ error: "Reply target was not found on this item." });
+      return;
+    }
+
+    const comment = insertWorkComment({
+      id: crypto.randomUUID(),
+      workItemId: record.id,
+      parentCommentId: parentComment?.id ?? null,
+      discordUserId: user.id,
+      discordAvatarUrl: user.avatarUrl,
+      discordUsername: user.displayName,
+      authorType: "user",
+      body: input.body
+    });
+
+    insertActivityEvent({
+      id: crypto.randomUUID(),
+      workItemId: record.id,
+      type: "commented",
+      actorName: user.displayName,
+      body: "Added a comment.",
+      metadataJson: JSON.stringify({ commentId: comment.id })
+    });
+
+    const dmTargets = new Map<string, { type: string; body: string }>();
+    const itemLink = config.appBaseUrl ? `${config.appBaseUrl.replace(/\/+$/, "")}/items/${record.id}` : null;
+    const commentPreview = notificationBodyPreview(input.body);
+    const baseDmBody = `${user.displayName} mentioned you on "${record.title}".\n\n${commentPreview}${
+      itemLink ? `\n\nOpen: ${itemLink}` : "\n\nOpen Project Desk to reply."
+    }`;
+
+    for (const recipient of findMentionRecipients(input.body, record, [...existingComments, comment])) {
+      if (recipient.discordUserId !== user.id) {
+        dmTargets.set(recipient.discordUserId, { type: "mention", body: baseDmBody });
+      }
+    }
+
+    if (parentComment?.discordUserId && parentComment.discordUserId !== user.id && !dmTargets.has(parentComment.discordUserId)) {
+      dmTargets.set(parentComment.discordUserId, {
+        type: "comment_reply",
+        body: `${user.displayName} replied to you on "${record.title}".\n\n${commentPreview}${
+          itemLink ? `\n\nOpen: ${itemLink}` : "\n\nOpen Project Desk to reply."
+        }`
+      });
+    }
+
+    await Promise.all(
+      [...dmTargets.entries()].map(([discordUserId, notification]) =>
+        sendRecordedDm(discord, {
+          workItemId: record.id,
+          discordUserId,
+          type: notification.type,
+          body: notification.body
+        })
+      )
+    );
+
+    if (mentionsAi(input.body) && !isArchivedStage(record.stage)) {
+      aiWorker.enqueueWorkItemJob(record.id, "comment_review", `@AI was mentioned by ${user.displayName}.`);
+    }
+
+    emitProjectDeskEvent({ type: "work_item_changed", workItemId: record.id });
+
+    res.status(201).json({ comment: toWorkCommentApi(comment) });
+  });
+
+  api.patch("/work-items/:id/stage", requireAuth, (req, res) => {
+    const user = getSession(req).user!;
+    const workItemId = routeParam(req.params.id);
+    const record = workItemId ? getWorkItemById(workItemId) : null;
+
+    if (!record || !canAccessWorkItem(user, record)) {
+      res.status(404).json({ error: "Work item not found." });
+      return;
+    }
+
+    const input = updateWorkItemStageSchema.parse(req.body);
+    const nextKind = promoteKindForStage(record, input.stage);
+    const updated = updateWorkItemStage(record.id, input.stage, nextKind);
+
+    if (!updated) {
+      res.status(404).json({ error: "Work item not found." });
+      return;
+    }
+
+    insertActivityEvent({
+      id: crypto.randomUUID(),
+      workItemId: updated.id,
+      type: "stage_changed",
+      actorName: user.displayName,
+      body: `Moved from ${stageDefinition(record.stage).name} to ${stageDefinition(updated.stage).name}.`,
+      metadataJson: JSON.stringify({ from: record.stage, to: updated.stage })
+    });
+
+    if (["validated", "parked", "killed", "done"].includes(updated.stage)) {
+      insertDecision({
+        id: crypto.randomUUID(),
+        workItemId: updated.id,
+        decision: updated.stage,
+        actorDiscordUserId: user.id,
+        actorName: user.displayName,
+        rationale: input.rationale ?? null
+      });
+    }
+
+    emitProjectDeskEvent({ type: "work_items_changed" });
+    emitProjectDeskEvent({ type: "work_item_changed", workItemId: updated.id });
+
+    res.json({
+      item: toWorkItemSummary(updated)
+    });
+  });
+
+  api.post("/work-items/:id/ai-jobs", requireAuth, (req, res) => {
+    const user = getSession(req).user!;
+    const workItemId = routeParam(req.params.id);
+    const record = workItemId ? getWorkItemById(workItemId) : null;
+
+    if (!record || !canAccessWorkItem(user, record)) {
+      res.status(404).json({ error: "Work item not found." });
+      return;
+    }
+
+    if (isArchivedStage(record.stage)) {
+      res.status(409).json({ error: "Archived items only allow AI archive summaries." });
+      return;
+    }
+
+    const input = enqueueAiJobSchema.parse(req.body);
+    const job = aiWorker.enqueueWorkItemJob(record.id, input.type, input.reason ?? "Workflow action requested.");
+
+    insertActivityEvent({
+      id: crypto.randomUUID(),
+      workItemId: record.id,
+      type: "ai_job_enqueued",
+      actorName: user.displayName,
+      body: `Queued ${input.type}.`,
+      metadataJson: JSON.stringify({ jobId: job.id })
+    });
+
+    emitProjectDeskEvent({ type: "work_item_changed", workItemId: record.id });
+
+    res.status(202).json({ aiJob: job });
+  });
+
+  api.get("/notifications", requireAuth, (req, res) => {
+    const user = getSession(req).user!;
+    res.json({ notifications: listNotificationsForUser(user.id) });
   });
 
   api.get("/requests", requireAuth, async (req, res) => {
@@ -493,22 +1016,28 @@ export function createApp({ plane, discord }: CreateAppServices) {
     });
   });
 
-  api.get("/board", requireAuth, requireAdmin, async (_req, res) => {
-    const [workItems, states, recentRequests] = await Promise.all([
-      plane.listWorkItems(),
-      plane.listStates().catch(() => []),
-      Promise.resolve(listRecentRequests(25))
-    ]);
+  api.get("/board", requireAuth, (req, res) => {
+    const user = getSession(req).user!;
+    runInactiveArchiveSweep();
+    const workItems = listWorkItemsForUser(user.id, user.isAdmin);
+    const recentItems = workItems.slice(0, 25).map(toWorkItemSummary);
 
     res.json({
-      boardUrl: config.plane.fullBoardUrl,
-      states,
-      workItems: workItems.map(toBoardItem),
-      recentRequests: await attachWorkItems(recentRequests, plane)
+      boardUrl: user.isAdmin ? config.plane.fullBoardUrl : null,
+      states: workStageDefinitions.map((stage) => ({
+        id: stage.id,
+        name: stage.name,
+        group: stage.group,
+        color: stage.color
+      })),
+      workItems: workItems.map(toLocalBoardItem),
+      recentItems,
+      recentRequests: []
     });
   });
 
-  api.patch("/board/items/:id/state", requireAuth, requireAdmin, async (req, res) => {
+  api.patch("/board/items/:id/state", requireAuth, (req, res) => {
+    const user = getSession(req).user!;
     const workItemId = routeParam(req.params.id);
 
     if (!workItemId) {
@@ -517,9 +1046,39 @@ export function createApp({ plane, discord }: CreateAppServices) {
     }
 
     const input = updateBoardItemStateSchema.parse(req.body);
-    const workItem = await plane.updateWorkItemState(workItemId, input.stateId);
+    const current = getWorkItemById(workItemId);
 
-    res.json({ workItem: toBoardItem(workItem) });
+    if (!current || !canAccessWorkItem(user, current)) {
+      res.status(404).json({ error: "Work item not found." });
+      return;
+    }
+
+    if (!workStages.includes(input.stateId as WorkStage)) {
+      res.status(400).json({ error: "Unknown Project Desk stage." });
+      return;
+    }
+
+    const stage = input.stateId as WorkStage;
+    const updated = updateWorkItemStage(current.id, stage, promoteKindForStage(current, stage));
+
+    if (!updated) {
+      res.status(404).json({ error: "Work item not found." });
+      return;
+    }
+
+    insertActivityEvent({
+      id: crypto.randomUUID(),
+      workItemId: updated.id,
+      type: "board_stage_changed",
+      actorName: user.displayName,
+      body: `Moved from ${stageDefinition(current.stage).name} to ${stageDefinition(updated.stage).name}.`,
+      metadataJson: JSON.stringify({ from: current.stage, to: updated.stage })
+    });
+
+    emitProjectDeskEvent({ type: "work_items_changed" });
+    emitProjectDeskEvent({ type: "work_item_changed", workItemId: updated.id });
+
+    res.json({ workItem: toLocalBoardItem(updated) });
   });
 
   api.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {

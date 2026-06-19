@@ -1,31 +1,33 @@
 # Project Desk
 
-Project Desk is a self-hostable Discord mini app for Plane-backed requests. Users authenticate with Discord, submit requests, view their own Plane-linked work items, and comment without needing direct Plane access. Admin or power users, defined by Discord role IDs, can open the underlying Plane issue or full board.
+Project Desk is a self-hostable Discord mini app for AI-assisted idea, project, task, and review workflows. Users authenticate with Discord, create ideas, turn them into plans, break work into tasks, review progress, and receive DM-first follow-ups without needing their own AI keys.
+
+The app now treats local SQLite as the Project Desk source of truth. Plane remains available as a future execution-board sync target, but Plane is not required for local/demo workflows.
 
 ## Stack
 
 - React + Vite + TypeScript frontend
 - Node.js + Express backend
-- `discord.js` bot notification worker
-- SQLite local mapping store
-- Plane REST API integration
+- `discord.js` bot and DM notification worker
+- SQLite workflow store
+- Hermes/OpenAI-compatible background AI worker
+- Optional Plane REST API integration
 - Docker Compose deployment
 
 ## What Project Desk Does
 
 - Discord OAuth login
-- Home, Submit, My Requests, and Board tabs
-- Request form with title, type, priority, and details
-- Server-side Plane work-item creation
-- Local Discord user to Plane issue mapping
-- Per-user request list with live Plane status pills
-- Request detail page with comments
-- Comment creation back into Plane
-- Discord embed posted when a request is created
-- Admin-only Open in Plane and Open Full Board links
-- Local demo mode with fake Plane data
+- Home, Ideas, Projects, Tasks, Board, and Reviews tabs
+- Idea intake with title, priority, and details
+- Local lifecycle stages: Inbox, Review, Validated, Planning, Active, Reviewing, Done, Parked, and Killed
+- Request/project/task detail pages with comments, AI artifacts, child tasks, and activity
+- Workflow AI jobs for idea briefs, validation reviews, project plans, task breakdowns, progress reviews, and Build Demo packages
+- DM-first notification records for assignments, review-ready items, blockers, and digests
+- Local board drag/drop across Project Desk stages
+- Public Discord channel posting disabled by default
+- Local demo mode without Plane or Hermes required
 
-Plane itself is not included. Point Project Desk at an existing Plane workspace and project.
+Plane itself is not included. Point Project Desk at an existing Plane workspace and project when you are ready to sync execution work to Plane.
 
 ## Environment
 
@@ -44,9 +46,15 @@ Required variables:
 | `DISCORD_CLIENT_SECRET` | Discord OAuth client secret |
 | `DISCORD_BOT_TOKEN` | Bot token used for role lookup and channel embeds |
 | `DISCORD_GUILD_ID` | Guild where users and admin roles are checked |
-| `DISCORD_REQUEST_CHANNEL_ID` | Text channel for new request embeds |
+| `DISCORD_REQUEST_CHANNEL_ID` | Text channel used by the pinned Activity launcher |
 | `DISCORD_ADMIN_ROLE_IDS` | Comma-separated role IDs that can open Plane links |
+| `DISCORD_PUBLIC_CHANNEL_POSTING` | Set `true` only if legacy public request embeds should be posted |
 | `DISCORD_PUBLIC_KEY` | Discord application public key for interaction signature verification |
+| `AI_PROVIDER` | `demo`, `hermes`, or `disabled`; demo mode defaults to deterministic local AI artifacts |
+| `AI_WORKER_ENABLED` | Set `false` to stop background AI job processing |
+| `HERMES_API_BASE_URL` | Hermes OpenAI-compatible API base URL, usually `http://127.0.0.1:9119/v1` |
+| `HERMES_API_KEY` | Server-only API key for Hermes, if the API server requires one |
+| `HERMES_MODEL` | Hermes model id, default `hermes-agent` |
 | `PLANE_BASE_URL` | Plane API base URL, for example `https://api.plane.so` |
 | `PLANE_API_KEY` | Plane API key, used only by the backend |
 | `PLANE_WORKSPACE_SLUG` | Plane workspace slug |
@@ -55,7 +63,7 @@ Required variables:
 | `DATABASE_URL` | SQLite URL, for example `file:./data/project-desk.db` |
 | `SESSION_SECRET` | Long random cookie signing secret |
 
-When `DEMO_MODE=true`, Plane variables can be left empty. Discord variables are still required because demo mode keeps Discord OAuth, role checks, and bot embeds real.
+When `DEMO_MODE=true`, Plane variables can be left empty. Discord variables are still required because demo mode keeps Discord OAuth, role checks, bot DMs, and the Activity launcher real.
 
 Optional variables:
 
@@ -82,15 +90,36 @@ For local development with the default port:
 http://localhost:3000/api/auth/discord/callback
 ```
 
-The OAuth flow requests the `identify` scope. Guild roles are checked server-side with the bot token, so the Plane API key never reaches the browser.
+The OAuth flow requests the `identify` scope. Guild roles are checked server-side with the bot token, so Plane and Hermes credentials never reach the browser.
+
+## AI Worker Setup
+
+Project Desk users do not provide AI keys. The backend calls a shared Hermes API server, and Hermes owns Codex OAuth and credential pooling.
+
+For a no-dependency local demo, use:
+
+```text
+AI_PROVIDER=demo
+```
+
+For shared Hermes/Codex-backed AI, run Hermes' OpenAI-compatible API server and set:
+
+```text
+AI_PROVIDER=hermes
+HERMES_API_BASE_URL=http://127.0.0.1:9119/v1
+HERMES_API_KEY=<server-only-key-if-required>
+HERMES_MODEL=hermes-agent
+```
+
+Never put Codex OAuth tokens, OpenAI keys, Hermes auth files, cookies, or other provider secrets in Project Desk data, Discord messages, or frontend code.
 
 ## Local Discord Demo Without Plane
 
-Demo mode lets you test Project Desk on this PC with real Discord login and bot embeds while fake Plane work items/comments are stored in SQLite.
+Demo mode lets you test Project Desk on this PC with real Discord login, bot DMs, a pinned launcher, local workflow data, and deterministic demo AI artifacts stored in SQLite.
 
 1. Install Node.js 22 or newer.
 2. Create a Discord application and bot in the Discord Developer Portal.
-3. Invite the bot to a private test server and allow it to post in the request channel.
+3. Invite the bot to a private test server and allow it to post the pinned Activity launcher.
 4. Copy `.env.example` to `.env`.
 5. Fill in the Discord values, then set:
 
@@ -140,7 +169,7 @@ npm run discord:pin-launch
 
 This creates or updates a pinned Project Desk message in `DISCORD_REQUEST_CHANNEL_ID`. Re-running the command updates the existing pinned launcher instead of posting another one, and it unpins duplicate Project Desk launch pins if any were created while testing. The `Play` button uses the same signed `/api/interactions` endpoint and launches the Activity without posting a new Game Invitation card.
 
-Open the Activity in your test server. New requests start in `Triage`; the admin Board tab also includes demo `Triage`, `In Progress`, and `Done` work items so the full board can be shown without Plane.
+Open the Activity in your test server. New ideas start in `Inbox`; board drag/drop moves items through Project Desk stages and queues AI work for eligible phases.
 
 ## Plane Setup
 
@@ -205,8 +234,11 @@ npm start
 ## Notes
 
 - Plane API calls are server-side only.
-- The frontend uses relative `/api` routes and never receives `PLANE_API_KEY`.
-- `DEMO_MODE=true` uses local SQLite fake Plane data and does not call Plane.
+- Hermes API calls are server-side only.
+- The frontend uses relative `/api` routes and never receives `PLANE_API_KEY`, `HERMES_API_KEY`, Codex OAuth tokens, or OpenAI keys.
+- `DEMO_MODE=true` uses local SQLite workflow data and does not call Plane.
+- `AI_PROVIDER=demo` creates deterministic local AI artifacts without calling Hermes.
+- `DISCORD_PUBLIC_CHANNEL_POSTING=false` keeps workflow updates out of public channels by default.
 - Admin access is controlled by `DISCORD_ADMIN_ROLE_IDS`.
-- `Open in Plane` is shown on request details for admin users.
+- `Open in Plane` is shown on item details for admin users.
 - `Open Full Board` is shown on the Board tab for admin users.

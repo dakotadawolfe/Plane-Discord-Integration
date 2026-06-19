@@ -1,13 +1,18 @@
 import type {
+  AiJobType,
   BoardItem,
   CurrentUser,
+  KnownPerson,
   MeResponse,
+  NotificationRecord,
+  ProjectDeskEvent,
   PublicConfig,
-  RequestComment,
-  RequestDetail,
   RequestPriority,
-  RequestSummary,
-  RequestType
+  WorkComment,
+  WorkItemDetailPayload,
+  WorkItemKind,
+  WorkItemSummary,
+  WorkStage
 } from "./types";
 
 export class ApiError extends Error {
@@ -70,48 +75,110 @@ export function exchangeDiscordActivityCode(code: string): Promise<{
   });
 }
 
-export function listRequests(): Promise<{ requests: RequestSummary[] }> {
-  return apiFetch<{ requests: RequestSummary[] }>("/api/requests");
+export function listWorkItems(): Promise<{ items: WorkItemSummary[] }> {
+  return apiFetch<{ items: WorkItemSummary[] }>("/api/work-items");
 }
 
-export function createRequest(input: {
+export function listPeople(): Promise<{ people: KnownPerson[] }> {
+  return apiFetch<{ people: KnownPerson[] }>("/api/people");
+}
+
+export function createWorkItem(input: {
   title: string;
-  type: RequestType;
-  priority: RequestPriority;
   details: string;
-}): Promise<{ request: RequestSummary }> {
-  return apiFetch<{ request: RequestSummary }>("/api/requests", {
+  kind?: WorkItemKind;
+  priority?: RequestPriority;
+  parentId?: string | null;
+}): Promise<{ item: WorkItemSummary }> {
+  return apiFetch<{ item: WorkItemSummary }>("/api/work-items", {
     method: "POST",
     body: JSON.stringify(input)
   });
 }
 
-export function getRequest(id: string): Promise<{
-  request: RequestDetail;
-  comments: RequestComment[];
-}> {
-  return apiFetch(`/api/requests/${id}`);
+export function getWorkItem(id: string): Promise<WorkItemDetailPayload> {
+  return apiFetch(`/api/work-items/${id}`);
 }
 
-export function addComment(id: string, body: string): Promise<{ comment: RequestComment }> {
-  return apiFetch(`/api/requests/${id}/comments`, {
+export function addWorkComment(
+  id: string,
+  body: string,
+  parentCommentId?: string | null
+): Promise<{ comment: WorkComment }> {
+  return apiFetch(`/api/work-items/${id}/comments`, {
     method: "POST",
-    body: JSON.stringify({ body })
+    body: JSON.stringify({ body, parentCommentId })
   });
 }
 
+export function updateWorkItemStage(
+  id: string,
+  stage: WorkStage,
+  rationale?: string
+): Promise<{ item: WorkItemSummary }> {
+  return apiFetch(`/api/work-items/${id}/stage`, {
+    method: "PATCH",
+    body: JSON.stringify({ stage, rationale })
+  });
+}
+
+export function enqueueAiJob(
+  id: string,
+  type: AiJobType,
+  reason?: string
+): Promise<{ aiJob: { id: string; type: AiJobType; status: string } }> {
+  return apiFetch(`/api/work-items/${id}/ai-jobs`, {
+    method: "POST",
+    body: JSON.stringify({ type, reason })
+  });
+}
+
+export function getNotifications(): Promise<{ notifications: NotificationRecord[] }> {
+  return apiFetch("/api/notifications");
+}
+
 export function getBoard(): Promise<{
-  boardUrl: string;
+  boardUrl: string | null;
   states: BoardItem["status"][];
   workItems: BoardItem[];
-  recentRequests: RequestSummary[];
+  recentItems: WorkItemSummary[];
+  recentRequests: [];
 }> {
   return apiFetch("/api/board");
 }
 
-export function updateBoardItemState(id: string, stateId: string): Promise<{ workItem: BoardItem }> {
+export function updateBoardItemState(id: string, stateId: WorkStage): Promise<{ workItem: BoardItem }> {
   return apiFetch(`/api/board/items/${encodeURIComponent(id)}/state`, {
     method: "PATCH",
     body: JSON.stringify({ stateId })
   });
+}
+
+export function subscribeProjectDeskEvents(onEvent: (event: ProjectDeskEvent) => void): () => void {
+  const source = new EventSource("/api/events", { withCredentials: true });
+  const eventTypes: ProjectDeskEvent["type"][] = ["work_items_changed", "work_item_changed", "notifications_changed"];
+  const listeners = eventTypes.map((type) => {
+    const listener = (event: MessageEvent<string>) => {
+      try {
+        onEvent(JSON.parse(event.data) as ProjectDeskEvent);
+      } catch {
+        // Ignore malformed event payloads and keep the stream alive.
+      }
+    };
+
+    source.addEventListener(type, listener);
+    return { type, listener };
+  });
+
+  source.onerror = () => {
+    // Native EventSource retries automatically. Timed page refreshes cover longer disconnects.
+  };
+
+  return () => {
+    for (const { type, listener } of listeners) {
+      source.removeEventListener(type, listener);
+    }
+
+    source.close();
+  };
 }

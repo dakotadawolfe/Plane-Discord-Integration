@@ -14,6 +14,27 @@ interface DiscordGuildMember {
   roles?: string[];
 }
 
+interface DiscordApiUser {
+  id: string;
+  username: string;
+  global_name?: string | null;
+  avatar?: string | null;
+}
+
+export interface DiscordUserProfile {
+  displayName: string;
+  avatarUrl: string | null;
+}
+
+function discordAvatarUrl(discordUserId: string, avatarHash?: string | null): string | null {
+  if (!avatarHash) {
+    return null;
+  }
+
+  const extension = avatarHash.startsWith("a_") ? "gif" : "png";
+  return `https://cdn.discordapp.com/avatars/${discordUserId}/${avatarHash}.${extension}?size=128`;
+}
+
 export class DiscordService {
   private client: Client | null = null;
 
@@ -55,7 +76,61 @@ export class DiscordService {
     return config.discord.adminRoleIds.some((roleId) => roles.includes(roleId));
   }
 
+  async fetchUserProfile(discordUserId: string): Promise<DiscordUserProfile | null> {
+    if (this.client?.isReady()) {
+      try {
+        const user = await this.client.users.fetch(discordUserId);
+
+        return {
+          displayName: user.globalName ?? user.username,
+          avatarUrl: user.displayAvatarURL({ size: 128 })
+        };
+      } catch {
+        // Fall through to the REST path below.
+      }
+    }
+
+    const response = await fetch(`https://discord.com/api/v10/users/${discordUserId}`, {
+      headers: {
+        Authorization: `Bot ${config.discord.botToken}`,
+        Accept: "application/json"
+      }
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const user = (await response.json()) as DiscordApiUser;
+
+    return {
+      displayName: user.global_name ?? user.username,
+      avatarUrl: discordAvatarUrl(user.id, user.avatar)
+    };
+  }
+
+  async sendDm(discordUserId: string, body: string): Promise<{ sent: boolean; reason?: string }> {
+    if (!this.client?.isReady()) {
+      return { sent: false, reason: "bot_not_ready" };
+    }
+
+    try {
+      const user = await this.client.users.fetch(discordUserId);
+      await user.send(body.slice(0, 1900));
+      return { sent: true };
+    } catch (error) {
+      return {
+        sent: false,
+        reason: error instanceof Error ? error.message.slice(0, 300) : "dm_failed"
+      };
+    }
+  }
+
   async notifyRequestCreated(request: RequestRecord): Promise<{ sent: boolean; reason?: string }> {
+    if (!config.discord.publicChannelPosting) {
+      return { sent: false, reason: "public_channel_posting_disabled" };
+    }
+
     if (!this.client?.isReady()) {
       return { sent: false, reason: "bot_not_ready" };
     }

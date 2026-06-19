@@ -37,6 +37,11 @@ const optionalBooleanString = z.preprocess(
   z.enum(["true", "false"]).optional()
 );
 
+const optionalAiProvider = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z.enum(["hermes", "demo", "disabled"]).optional()
+);
+
 const optionalString = z.preprocess(
   (value) => (value === "" ? undefined : value),
   z.string().optional()
@@ -80,7 +85,13 @@ const envSchema = z
     DISCORD_GUILD_ID: z.string().min(1),
     DISCORD_REQUEST_CHANNEL_ID: z.string().min(1),
     DISCORD_ADMIN_ROLE_IDS: z.string().default(""),
+    DISCORD_PUBLIC_CHANNEL_POSTING: optionalBooleanString,
     DISCORD_PUBLIC_KEY: optionalString,
+    AI_PROVIDER: optionalAiProvider,
+    AI_WORKER_ENABLED: optionalBooleanString,
+    HERMES_API_BASE_URL: optionalString,
+    HERMES_API_KEY: optionalString,
+    HERMES_MODEL: optionalString,
     PLANE_BASE_URL: optionalString,
     PLANE_API_KEY: optionalString,
     PLANE_WORKSPACE_SLUG: optionalString,
@@ -90,6 +101,14 @@ const envSchema = z
     SESSION_SECRET: z.string().min(16)
   })
   .superRefine((value, ctx) => {
+    if (value.AI_PROVIDER === "hermes" && !value.HERMES_API_BASE_URL) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["HERMES_API_BASE_URL"],
+        message: "HERMES_API_BASE_URL is required when AI_PROVIDER=hermes."
+      });
+    }
+
     if (value.DEMO_MODE === "true") {
       return;
     }
@@ -146,7 +165,15 @@ export const config = {
     guildId: env.DISCORD_GUILD_ID,
     requestChannelId: env.DISCORD_REQUEST_CHANNEL_ID,
     adminRoleIds: parseCsv(env.DISCORD_ADMIN_ROLE_IDS),
+    publicChannelPosting: env.DISCORD_PUBLIC_CHANNEL_POSTING === "true",
     publicKey: env.DISCORD_PUBLIC_KEY
+  },
+  ai: {
+    provider: env.AI_PROVIDER ?? (demoMode ? "demo" : "disabled"),
+    workerEnabled: env.AI_WORKER_ENABLED ? env.AI_WORKER_ENABLED === "true" : true,
+    hermesBaseUrl: env.HERMES_API_BASE_URL?.replace(/\/+$/, "") ?? "http://127.0.0.1:9119/v1",
+    hermesApiKey: env.HERMES_API_KEY,
+    hermesModel: env.HERMES_MODEL ?? "hermes-agent"
   },
   plane: {
     baseUrl: (env.PLANE_BASE_URL ?? "https://project-desk-demo.local").replace(/\/+$/, ""),
