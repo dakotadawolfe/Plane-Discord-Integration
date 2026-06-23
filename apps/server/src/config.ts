@@ -141,6 +141,7 @@ const envSchema = z
     SOURCE_SYNC_REPO_DIR: optionalString,
     SOURCE_SYNC_REMOTE: optionalString,
     SOURCE_SYNC_BRANCH: optionalString,
+    UPLOADS_DIR: optionalString,
     REQUEST_BODY_LIMIT: optionalRequestBodyLimit,
     PLANE_BASE_URL: optionalString,
     PLANE_API_KEY: optionalString,
@@ -316,6 +317,9 @@ export const config = {
     repoDir: resolve(repoRoot, env.SOURCE_SYNC_REPO_DIR ?? "."),
     remote: env.SOURCE_SYNC_REMOTE ?? "origin",
     branch: env.SOURCE_SYNC_BRANCH ?? "main"
+  },
+  uploads: {
+    dir: resolve(repoRoot, env.UPLOADS_DIR ?? "data/uploads")
   },
   http: {
     requestBodyLimit: env.REQUEST_BODY_LIMIT ?? "50mb"

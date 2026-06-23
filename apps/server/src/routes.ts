@@ -8,6 +8,12 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { AiWorker } from "./ai-worker.js";
 import { AiUnavailableError, type AiClient } from "./ai.js";
+import {
+  DiscordGuildMembershipLookupError,
+  DiscordGuildMembershipRequiredError,
+  guildMembershipRequiredMessage,
+  requireDiscordGuildMembership
+} from "./auth.js";
 import { config } from "./config.js";
 import type {
   AttachmentRecord,
@@ -1808,10 +1814,15 @@ async function fetchDiscordUser(accessToken: string): Promise<DiscordUser> {
 
 async function createSessionUser(discord: DiscordService, accessToken: string): Promise<SessionUser> {
   const discordUser = await fetchDiscordUser(accessToken);
-  const roles = await discord.fetchMemberRoles(discordUser.id);
-  const displayName = discordUser.global_name ?? discordUser.username;
-  const avatarUrl = discordAvatarUrl(discordUser);
-  const isAdmin = discord.isAdmin(roles);
+  const guildMember = requireDiscordGuildMembership(
+    await discord.fetchGuildMemberProfile(discordUser.id).catch((error: unknown) => {
+      throw new DiscordGuildMembershipLookupError(error instanceof Error ? error.message : undefined);
+    })
+  );
+  const roles = guildMember.roles;
+  const displayName = guildMember.displayName || discordUser.global_name || discordUser.username;
+  const avatarUrl = guildMember.avatarUrl ?? discordAvatarUrl(discordUser);
+  const isAdmin = guildMember.isAdmin;
 
   const profile = upsertUserProfile({
     discordUserId: discordUser.id,
@@ -1834,6 +1845,30 @@ async function createSessionUser(discord: DiscordService, accessToken: string): 
   };
 }
 
+function sendDiscordAuthError(res: Response, error: unknown, format: "html" | "json"): boolean {
+  if (error instanceof DiscordGuildMembershipRequiredError) {
+    if (format === "json") {
+      res.status(403).json({ error: guildMembershipRequiredMessage });
+    } else {
+      res.status(403).send(guildMembershipRequiredMessage);
+    }
+    return true;
+  }
+
+  if (error instanceof DiscordGuildMembershipLookupError) {
+    const message = "Could not verify Discord server membership. Try again in a moment.";
+
+    if (format === "json") {
+      res.status(503).json({ error: message });
+    } else {
+      res.status(503).send(message);
+    }
+    return true;
+  }
+
+  return false;
+}
+
 async function attachWorkItems(records: RequestRecord[], plane: PlaneLikeClient) {
   return Promise.all(
     records.map(async (record) => {
@@ -1850,7 +1885,7 @@ export function createApp({ plane, discord, aiWorker, ai, taskRunner }: CreateAp
   const app = express();
   const __dirname = dirname(fileURLToPath(import.meta.url));
   const webDistDir = process.env.WEB_DIST_DIR ?? resolve(__dirname, "../../web/dist");
-  const uploadsDir = resolve(__dirname, "../../../data/uploads");
+  const uploadsDir = config.uploads.dir;
 
   app.set("trust proxy", 1);
   app.use(
@@ -1996,7 +2031,19 @@ export function createApp({ plane, discord, aiWorker, ai, taskRunner }: CreateAp
 
     const redirectUri = session.oauthRedirectUri ?? `${requestBaseUrl(req)}/api/auth/discord/callback`;
     const token = await exchangeDiscordCode(code, redirectUri);
-    session.user = await createSessionUser(discord, token.access_token);
+
+    try {
+      session.user = await createSessionUser(discord, token.access_token);
+    } catch (error) {
+      session.user = undefined;
+
+      if (sendDiscordAuthError(res, error, "html")) {
+        return;
+      }
+
+      throw error;
+    }
+
     session.oauthState = undefined;
     session.oauthRedirectUri = undefined;
 
@@ -2008,7 +2055,17 @@ export function createApp({ plane, discord, aiWorker, ai, taskRunner }: CreateAp
   api.post("/auth/discord/activity", async (req, res) => {
     const input = activityAuthSchema.parse(req.body);
     const token = await exchangeDiscordActivityCode(input.code);
-    const user = await createSessionUser(discord, token.access_token);
+    let user: SessionUser;
+
+    try {
+      user = await createSessionUser(discord, token.access_token);
+    } catch (error) {
+      if (sendDiscordAuthError(res, error, "json")) {
+        return;
+      }
+
+      throw error;
+    }
 
     getSession(req).user = user;
 

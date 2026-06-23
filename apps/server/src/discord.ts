@@ -39,6 +39,10 @@ export interface DiscordGuildPerson {
   isAdmin: boolean;
 }
 
+export interface DiscordGuildMemberProfile extends DiscordGuildPerson {
+  roles: string[];
+}
+
 function discordAvatarUrl(discordUserId: string, avatarHash?: string | null): string | null {
   if (!avatarHash) {
     return null;
@@ -67,6 +71,11 @@ export class DiscordService {
   }
 
   async fetchMemberRoles(discordUserId: string): Promise<string[]> {
+    const member = await this.fetchGuildMemberProfile(discordUserId).catch(() => null);
+    return member?.roles ?? [];
+  }
+
+  async fetchGuildMemberProfile(discordUserId: string): Promise<DiscordGuildMemberProfile | null> {
     const response = await fetch(
       `https://discord.com/api/v10/guilds/${config.discord.guildId}/members/${discordUserId}`,
       {
@@ -77,12 +86,30 @@ export class DiscordService {
       }
     );
 
+    if (response.status === 404) {
+      return null;
+    }
+
     if (!response.ok) {
-      return [];
+      throw new Error(`Discord guild member lookup failed with ${response.status}.`);
     }
 
     const member = (await response.json()) as DiscordGuildMember;
-    return Array.isArray(member.roles) ? member.roles : [];
+
+    if (!member.user) {
+      return null;
+    }
+
+    const roles = Array.isArray(member.roles) ? member.roles : [];
+
+    return {
+      discordUserId: member.user.id,
+      discordUsername: member.user.username,
+      displayName: member.nick ?? member.user.global_name ?? member.user.username,
+      avatarUrl: discordAvatarUrl(member.user.id, member.user.avatar),
+      roles,
+      isAdmin: this.isAdmin(roles)
+    };
   }
 
   async listGuildMembers(): Promise<DiscordGuildPerson[]> {
