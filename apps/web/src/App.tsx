@@ -651,6 +651,10 @@ function isRestartRequiredCodexStatus(status: LocalCodexRunStatus | undefined): 
   return status === "restart_required";
 }
 
+function isSucceededCodexStatus(status: LocalCodexRunStatus | undefined): boolean {
+  return status === "succeeded";
+}
+
 function normalizeGlobalSearch(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
@@ -4135,6 +4139,7 @@ function TaskList({
         const codexStatus = codexStatuses[task.id];
         const codexActive = isActiveCodexStatus(codexStatus);
         const codexRestartRequired = isRestartRequiredCodexStatus(codexStatus);
+        const codexSucceeded = isSucceededCodexStatus(codexStatus);
 
         return (
           <article className="task-row" key={task.id}>
@@ -4155,6 +4160,7 @@ function TaskList({
                     {codexRestartRequired ? "Restart npm" : "AI working"}
                   </span>
                 ) : null}
+                {codexSucceeded ? <span className="codex-inline-status succeeded">AI complete</span> : null}
               </span>
             </div>
             <div className="task-row-actions">
