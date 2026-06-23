@@ -1,5 +1,5 @@
 import dotenv from "dotenv";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -47,6 +47,20 @@ const optionalString = z.preprocess(
   z.string().optional()
 );
 
+const optionalPositiveInteger = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z.coerce.number().int().positive().optional()
+);
+
+const optionalRequestBodyLimit = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z
+    .string()
+    .trim()
+    .regex(/^\d+(?:\.\d+)?\s*(?:b|kb|mb|gb)?$/i, "REQUEST_BODY_LIMIT must look like 50mb, 1024kb, or 1000000.")
+    .optional()
+);
+
 function isUrl(value: string): boolean {
   try {
     new URL(value);
@@ -92,6 +106,13 @@ const envSchema = z
     HERMES_API_BASE_URL: optionalString,
     HERMES_API_KEY: optionalString,
     HERMES_MODEL: optionalString,
+    LOCAL_CODEX_ENABLED: optionalBooleanString,
+    LOCAL_CODEX_COMMAND: optionalString,
+    LOCAL_CODEX_WORKSPACE_DIR: optionalString,
+    LOCAL_CODEX_TIMEOUT_SECONDS: optionalPositiveInteger,
+    LOCAL_CODEX_MAX_CONCURRENCY: optionalPositiveInteger,
+    LOCAL_CODEX_REQUIRE_ADMIN: optionalBooleanString,
+    REQUEST_BODY_LIMIT: optionalRequestBodyLimit,
     PLANE_BASE_URL: optionalString,
     PLANE_API_KEY: optionalString,
     PLANE_WORKSPACE_SLUG: optionalString,
@@ -145,8 +166,54 @@ function parseCsv(value: string): string[] {
     .filter(Boolean);
 }
 
+function newestExistingPath(paths: string[]): string | null {
+  const existingPaths = paths.filter((path) => existsSync(path));
+
+  if (existingPaths.length === 0) {
+    return null;
+  }
+
+  return existingPaths.sort((left, right) => {
+    try {
+      return statSync(right).mtimeMs - statSync(left).mtimeMs;
+    } catch {
+      return 0;
+    }
+  })[0];
+}
+
+function safeReadDirectories(path: string) {
+  if (!existsSync(path)) {
+    return [];
+  }
+
+  try {
+    return readdirSync(path, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+  } catch {
+    return [];
+  }
+}
+
+function defaultLocalCodexCommand(): string {
+  const localAppData = process.env.LOCALAPPDATA;
+
+  if (!localAppData) {
+    return "codex";
+  }
+
+  const userBin = resolve(localAppData, "OpenAI", "Codex", "bin");
+  const userBinCandidates = safeReadDirectories(userBin).map((entry) => resolve(userBin, entry.name, "codex.exe"));
+  const packageRoot = resolve(localAppData, "Packages");
+  const packageCandidates = safeReadDirectories(packageRoot)
+    .filter((entry) => entry.name.startsWith("OpenAI.Codex_"))
+    .map((entry) => resolve(packageRoot, entry.name, "LocalCache", "Local", "OpenAI", "Codex", "bin", "codex.exe"));
+
+  return newestExistingPath([...userBinCandidates, ...packageCandidates]) ?? "codex";
+}
+
 const isProduction = env.NODE_ENV === "production";
 const demoMode = env.DEMO_MODE === "true";
+const localCodexCommand = env.LOCAL_CODEX_COMMAND ?? defaultLocalCodexCommand();
 
 export const config = {
   nodeEnv: env.NODE_ENV,
@@ -174,6 +241,17 @@ export const config = {
     hermesBaseUrl: env.HERMES_API_BASE_URL?.replace(/\/+$/, "") ?? "http://127.0.0.1:9119/v1",
     hermesApiKey: env.HERMES_API_KEY,
     hermesModel: env.HERMES_MODEL ?? "hermes-agent"
+  },
+  localCodex: {
+    enabled: env.LOCAL_CODEX_ENABLED ? env.LOCAL_CODEX_ENABLED === "true" : true,
+    command: localCodexCommand,
+    workspaceDir: resolve(repoRoot, env.LOCAL_CODEX_WORKSPACE_DIR ?? "."),
+    timeoutMs: (env.LOCAL_CODEX_TIMEOUT_SECONDS ?? 1200) * 1000,
+    maxConcurrency: Math.min(env.LOCAL_CODEX_MAX_CONCURRENCY ?? 5, 5),
+    requireAdmin: env.LOCAL_CODEX_REQUIRE_ADMIN ? env.LOCAL_CODEX_REQUIRE_ADMIN === "true" : true
+  },
+  http: {
+    requestBodyLimit: env.REQUEST_BODY_LIMIT ?? "50mb"
   },
   plane: {
     baseUrl: (env.PLANE_BASE_URL ?? "https://project-desk-demo.local").replace(/\/+$/, ""),

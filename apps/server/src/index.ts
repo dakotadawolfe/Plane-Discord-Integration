@@ -4,13 +4,16 @@ import { AiWorker } from "./ai-worker.js";
 import { DemoPlaneClient } from "./demo-plane.js";
 import { DiscordService } from "./discord.js";
 import { heartbeatEventClients } from "./events.js";
+import { LocalCodexRunner } from "./local-codex-runner.js";
 import { runInactiveArchiveSweep } from "./maintenance.js";
 import { PlaneClient } from "./plane.js";
 import { createApp } from "./routes.js";
 
 const discord = new DiscordService();
 await discord.start();
-const aiWorker = new AiWorker(createAiClient(), discord);
+const ai = createAiClient();
+const aiWorker = new AiWorker(ai, discord);
+const localCodexRunner = new LocalCodexRunner();
 aiWorker.start();
 const eventHeartbeat = setInterval(heartbeatEventClients, 25000);
 runInactiveArchiveSweep();
@@ -19,7 +22,9 @@ const inactiveArchiveSweep = setInterval(runInactiveArchiveSweep, 60 * 60 * 1000
 const app = createApp({
   plane: config.demoMode ? new DemoPlaneClient() : new PlaneClient(),
   discord,
-  aiWorker
+  aiWorker,
+  ai,
+  localCodexRunner
 });
 
 const server = app.listen(config.port, () => {

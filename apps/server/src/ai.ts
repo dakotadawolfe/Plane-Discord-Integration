@@ -13,8 +13,21 @@ export interface AiContext {
   comments: WorkCommentRecord[];
   artifacts: AiArtifactRecord[];
   childItems: WorkItemRecord[];
+  referencedItems?: Array<{
+    item: WorkItemRecord;
+    comments: WorkCommentRecord[];
+  }>;
   jobType: AiJobType;
   reason: string;
+}
+
+export interface AiTitleContext {
+  workItem: WorkItemRecord;
+  comments: WorkCommentRecord[];
+  artifacts: AiArtifactRecord[];
+  childItems: WorkItemRecord[];
+  parentItem: WorkItemRecord | null;
+  siblingItems: WorkItemRecord[];
 }
 
 export interface AiResult {
@@ -25,8 +38,15 @@ export interface AiResult {
   dmBody?: string | null;
 }
 
+export interface AiTitleSuggestion {
+  title: string;
+  reason: string;
+  rawJson?: string | null;
+}
+
 export interface AiClient {
   generate(context: AiContext): Promise<AiResult>;
+  suggestTitle(context: AiTitleContext): Promise<AiTitleSuggestion>;
 }
 
 export class AiUnavailableError extends Error {
@@ -51,10 +71,14 @@ function jobLabel(type: AiJobType): string {
     .join(" ");
 }
 
+function compactContextJson(value: string | null | undefined): string {
+  return value ? `\n  Context JSON: ${value.slice(0, 1600)}` : "";
+}
+
 function compactContext(context: AiContext): string {
-  const { workItem, comments, artifacts, childItems } = context;
+  const { workItem, comments, artifacts, childItems, referencedItems = [] } = context;
   const latestComments = comments.slice(-8).map((comment) => {
-    return `- ${comment.discordUsername} (${comment.authorType}): ${comment.body}`;
+    return `- ${comment.discordUsername} (${comment.authorType}): ${comment.body}${compactContextJson(comment.contextJson)}`;
   });
   const latestArtifacts = artifacts.slice(0, 5).map((artifact) => {
     return `- ${artifact.title} (${artifact.type}): ${artifact.body.slice(0, 800)}`;
@@ -62,18 +86,64 @@ function compactContext(context: AiContext): string {
   const children = childItems.slice(0, 12).map((item) => {
     return `- ${item.title} [${item.kind}/${item.stage}/${item.priority}]: ${item.details}`;
   });
+  const references = referencedItems.slice(0, 8).map(({ item, comments: referenceComments }) => {
+    const latestReferenceComments = referenceComments.slice(-6).map((comment) => {
+      return `  - ${comment.discordUsername} (${comment.authorType}): ${comment.body.slice(0, 900)}${compactContextJson(comment.contextJson)}`;
+    });
+    const header = `- ${item.title} [${item.kind}/${item.stage}/${item.priority}/${item.taskStatus ?? "no_task_status"}]: ${item.details.slice(0, 1000)}`;
+
+    return latestReferenceComments.length ? `${header}\n  Recent comments:\n${latestReferenceComments.join("\n")}` : header;
+  });
 
   return [
     `Item: ${workItem.title}`,
     `Kind: ${workItem.kind}`,
     `Stage: ${workItem.stage}`,
     `Priority: ${workItem.priority}`,
-    `Owner: ${workItem.ownerDiscordUsername ?? "Unassigned"}`,
+    `Assigned to: ${workItem.ownerDiscordUsername ?? "Unassigned"}`,
     `Details:\n${workItem.details}`,
+    workItem.contextJson ? `Context JSON:\n${workItem.contextJson.slice(0, 2400)}` : null,
     latestComments.length ? `Recent comments:\n${latestComments.join("\n")}` : "Recent comments: none",
     latestArtifacts.length ? `Existing AI artifacts:\n${latestArtifacts.join("\n\n")}` : "Existing AI artifacts: none",
-    children.length ? `Child tasks/items:\n${children.join("\n")}` : "Child tasks/items: none"
-  ].join("\n\n");
+    children.length ? `Child tasks/items:\n${children.join("\n")}` : "Child tasks/items: none",
+    references.length ? `Referenced page context:\n${references.join("\n\n")}` : "Referenced page context: none"
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function compactTitleContext(context: AiTitleContext): string {
+  const { workItem, comments, artifacts, childItems, parentItem, siblingItems } = context;
+  const latestComments = comments.slice(-12).map((comment) => {
+    return `- ${comment.discordUsername} (${comment.authorType}): ${comment.body.slice(0, 900)}${compactContextJson(comment.contextJson)}`;
+  });
+  const latestArtifacts = artifacts.slice(0, 5).map((artifact) => {
+    return `- ${artifact.title} (${artifact.type}): ${artifact.body.slice(0, 700)}`;
+  });
+  const children = childItems.slice(0, 15).map((item) => {
+    return `- ${item.title} [${item.kind}/${item.stage}/${item.priority}/${item.taskStatus ?? "no_task_status"}]: ${item.details.slice(0, 500)}`;
+  });
+  const siblings = siblingItems.slice(0, 12).map((item) => {
+    return `- ${item.title} [${item.kind}/${item.stage}/${item.priority}/${item.taskStatus ?? "no_task_status"}]`;
+  });
+
+  return [
+    `Current title: ${workItem.title}`,
+    `Kind: ${workItem.kind}`,
+    `Stage: ${workItem.stage}`,
+    `Priority: ${workItem.priority}`,
+    `Category: ${workItem.category ?? "none"}`,
+    `Assigned to: ${workItem.ownerDiscordUsername ?? "Unassigned"}`,
+    parentItem ? `Parent: ${parentItem.title} [${parentItem.kind}/${parentItem.stage}]` : "Parent: none",
+    `Details:\n${workItem.details}`,
+    workItem.contextJson ? `Context JSON:\n${workItem.contextJson.slice(0, 2400)}` : null,
+    latestComments.length ? `Recent comments:\n${latestComments.join("\n")}` : "Recent comments: none",
+    latestArtifacts.length ? `Existing AI artifacts:\n${latestArtifacts.join("\n\n")}` : "Existing AI artifacts: none",
+    children.length ? `Child tasks/items:\n${children.join("\n")}` : "Child tasks/items: none",
+    siblings.length ? `Sibling tasks/items:\n${siblings.join("\n")}` : "Sibling tasks/items: none"
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function systemPrompt(): string {
@@ -86,6 +156,18 @@ function systemPrompt(): string {
     "Do not run commands. If execution seems needed, describe the action as a recommendation unless it is a local whitelisted Project Desk action.",
     "Return JSON only with keys: title, body, suggestedTasks, dmBody.",
     "body must be Markdown. suggestedTasks must be an array of { title, details, priority } using priority urgent/high/medium/low/none."
+  ].join(" ");
+}
+
+function titleSystemPrompt(): string {
+  return [
+    "You rename Project Desk ideas, projects, and tasks.",
+    "Return JSON only with keys: title, reason.",
+    "The title must be plain text, not Markdown.",
+    "Use 4 to 12 words when possible, max 80 characters.",
+    "Make it specific, action-oriented, and easy to scan in a Jira-like list.",
+    "Do not include private credentials, raw IDs, user secrets, or Discord channel noise.",
+    "Do not invent scope that is not supported by the provided context."
   ].join(" ");
 }
 
@@ -103,6 +185,29 @@ function userPrompt(context: AiContext): string {
     "For comment_review, respond to the new context with a short useful workflow comment.",
     compactContext(context)
   ].join("\n\n");
+}
+
+function titleUserPrompt(context: AiTitleContext): string {
+  return [
+    "Suggest a clearer title for this item using all available context.",
+    "Prefer the actual desired outcome over vague labels.",
+    "For tasks, start with a concrete verb when natural.",
+    "For ideas/projects, name the product/workflow and the concrete problem or outcome.",
+    compactTitleContext(context)
+  ].join("\n\n");
+}
+
+function cleanSuggestedTitle(value: string, fallbackTitle: string): string {
+  const normalized = value
+    .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!normalized) {
+    return fallbackTitle;
+  }
+
+  return normalized.slice(0, 160);
 }
 
 function parseAiJson(text: string, fallbackTitle: string): AiResult {
@@ -150,6 +255,31 @@ function parseAiJson(text: string, fallbackTitle: string): AiResult {
   };
 }
 
+function parseTitleJson(text: string, fallbackTitle: string): AiTitleSuggestion {
+  const trimmed = text.trim();
+  const jsonStart = trimmed.indexOf("{");
+  const jsonEnd = trimmed.lastIndexOf("}");
+
+  if (jsonStart >= 0 && jsonEnd > jsonStart) {
+    try {
+      const parsed = JSON.parse(trimmed.slice(jsonStart, jsonEnd + 1)) as Partial<AiTitleSuggestion>;
+      return {
+        title: cleanSuggestedTitle(typeof parsed.title === "string" ? parsed.title : "", fallbackTitle),
+        reason: typeof parsed.reason === "string" && parsed.reason.trim() ? parsed.reason.trim().slice(0, 500) : "Based on the current item context.",
+        rawJson: JSON.stringify(parsed)
+      };
+    } catch {
+      // Fall through to text fallback.
+    }
+  }
+
+  return {
+    title: cleanSuggestedTitle(trimmed.split(/\r?\n/)[0] ?? "", fallbackTitle),
+    reason: "Based on the current item context.",
+    rawJson: null
+  };
+}
+
 export class HermesAiClient implements AiClient {
   async generate(context: AiContext): Promise<AiResult> {
     const response = await fetch(`${config.ai.hermesBaseUrl}/chat/completions`, {
@@ -180,6 +310,37 @@ export class HermesAiClient implements AiClient {
     }
 
     return parseAiJson(content, jobLabel(context.jobType));
+  }
+
+  async suggestTitle(context: AiTitleContext): Promise<AiTitleSuggestion> {
+    const response = await fetch(`${config.ai.hermesBaseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(config.ai.hermesApiKey ? { Authorization: `Bearer ${config.ai.hermesApiKey}` } : {})
+      },
+      body: JSON.stringify({
+        model: config.ai.hermesModel,
+        temperature: 0.1,
+        messages: [
+          { role: "system", content: titleSystemPrompt() },
+          { role: "user", content: titleUserPrompt(context) }
+        ]
+      })
+    });
+
+    if (!response.ok) {
+      throw new AiUnavailableError(`Hermes AI title request failed with ${response.status}.`);
+    }
+
+    const payload = (await response.json()) as ChatCompletionResponse;
+    const content = payload.choices?.[0]?.message?.content;
+
+    if (!content) {
+      throw new AiUnavailableError("Hermes AI title response did not include content.");
+    }
+
+    return parseTitleJson(content, context.workItem.title);
   }
 }
 
@@ -246,7 +407,7 @@ export class DemoAiClient implements AiClient {
         "**Scope:** Build the smallest useful version that demonstrates the core workflow.",
         "**Non-scope:** Payments, public launch, complex permissions, and deep integrations.",
         "**Milestones:** define success, build first slice, review with the group.",
-        "**Risks:** vague owner, unclear proof, and too much automation before the workflow is proven."
+        "**Risks:** vague assignee, unclear proof, and too much automation before the workflow is proven."
       ],
       task_breakdown: [
         "## Task Breakdown",
@@ -255,8 +416,8 @@ export class DemoAiClient implements AiClient {
       progress_review: [
         "## Progress Review",
         "**Current state:** Review the latest comments and child tasks.",
-        "**Likely blocker:** Missing owner, proof, or next visible output.",
-        "**Recommended next action:** Assign one owner and one next deliverable."
+        "**Likely blocker:** Missing assignee, proof, or next visible output.",
+        "**Recommended next action:** Assign one person and one next deliverable."
       ],
       build_demo: [
         "## Build Demo Package",
@@ -267,7 +428,7 @@ export class DemoAiClient implements AiClient {
       comment_review: [
         "## Comment Review",
         "I read the latest comment and current phase.",
-        "The useful next move is to either clarify the proof needed, assign an owner, or move the item to the next phase."
+        "The useful next move is to either clarify the proof needed, assign someone, or move the item to the next phase."
       ],
       stage_review: [
         "## Stage Review",
@@ -276,7 +437,7 @@ export class DemoAiClient implements AiClient {
       ],
       digest: [
         "## Digest",
-        "There are active Project Desk items that may need owner attention."
+        "There are active Project Desk items that may need assignee attention."
       ]
     };
 
@@ -290,11 +451,36 @@ export class DemoAiClient implements AiClient {
         : null
     };
   }
+
+  async suggestTitle(context: AiTitleContext): Promise<AiTitleSuggestion> {
+    const { workItem, childItems, comments } = context;
+    const detailWords = workItem.details
+      .replace(/[^a-zA-Z0-9 ]/g, " ")
+      .split(/\s+/)
+      .filter((word) => word.length > 3)
+      .slice(0, 6)
+      .join(" ");
+    const childHint = childItems.find((item) => item.kind === "task")?.title;
+    const latestComment = comments.length > 0 ? comments[comments.length - 1] : null;
+    const commentHint = latestComment?.body.replace(/[#*_`>\-[\]()]/g, "").split(/\s+/).slice(0, 8).join(" ");
+    const base = childHint || detailWords || commentHint || workItem.title;
+    const prefix = workItem.kind === "task" ? "Complete" : workItem.kind === "project" ? "Ship" : "Explore";
+
+    return {
+      title: cleanSuggestedTitle(`${prefix} ${base}`, workItem.title),
+      reason: "Demo AI used the item details, latest comments, and linked tasks to produce a concise title.",
+      rawJson: JSON.stringify({ provider: "demo", source: childHint ? "child_task" : detailWords ? "details" : "comment" })
+    };
+  }
 }
 
 export class DisabledAiClient implements AiClient {
   async generate(): Promise<AiResult> {
     throw new AiUnavailableError("AI worker is disabled. Set AI_PROVIDER=hermes or AI_PROVIDER=demo.");
+  }
+
+  async suggestTitle(): Promise<AiTitleSuggestion> {
+    throw new AiUnavailableError("AI title suggestions are disabled. Set AI_PROVIDER=hermes or AI_PROVIDER=demo.");
   }
 }
 

@@ -55,6 +55,12 @@ Required variables:
 | `HERMES_API_BASE_URL` | Hermes OpenAI-compatible API base URL, usually `http://127.0.0.1:9119/v1` |
 | `HERMES_API_KEY` | Server-only API key for Hermes, if the API server requires one |
 | `HERMES_MODEL` | Hermes model id, default `hermes-agent` |
+| `LOCAL_CODEX_ENABLED` | Set `true` to allow Administrator task assignment to launch local `codex exec` |
+| `LOCAL_CODEX_COMMAND` | Optional Codex CLI command or full path; blank auto-discovers the Codex app CLI on Windows before falling back to `codex` |
+| `LOCAL_CODEX_WORKSPACE_DIR` | Workspace used by local Codex runs, default repo root |
+| `LOCAL_CODEX_TIMEOUT_SECONDS` | Local Codex task timeout, default `1200` |
+| `LOCAL_CODEX_MAX_CONCURRENCY` | Maximum simultaneous local Codex task runners, capped at `5` |
+| `LOCAL_CODEX_REQUIRE_ADMIN` | Set `false` only on trusted private demos if non-admins may assign tasks to local Codex |
 | `PLANE_BASE_URL` | Plane API base URL, for example `https://api.plane.so` |
 | `PLANE_API_KEY` | Plane API key, used only by the backend |
 | `PLANE_WORKSPACE_SLUG` | Plane workspace slug |
@@ -73,6 +79,7 @@ Optional variables:
 | `APP_BASE_URL` | Request host | Public base URL for Discord OAuth redirects |
 | `COOKIE_SECURE` | `true` in production | Set to `true` behind HTTPS |
 | `COOKIE_SAMESITE` | `none` in production, `lax` in dev | Use `none` for Discord iframe hosting over HTTPS |
+| `REQUEST_BODY_LIMIT` | `50mb` | Max JSON request body size; large files should still use attachments |
 
 ## Discord Setup
 
@@ -112,6 +119,18 @@ HERMES_MODEL=hermes-agent
 ```
 
 Never put Codex OAuth tokens, OpenAI keys, Hermes auth files, cookies, or other provider secrets in Project Desk data, Discord messages, or frontend code.
+
+Temporary local-PC Codex bridge:
+
+```text
+LOCAL_CODEX_ENABLED=true
+LOCAL_CODEX_COMMAND=
+LOCAL_CODEX_WORKSPACE_DIR=.
+LOCAL_CODEX_MAX_CONCURRENCY=5
+LOCAL_CODEX_REQUIRE_ADMIN=true
+```
+
+When an Administrator assigns a task to **Project Desk AI**, the backend runs `codex --ask-for-approval never exec --sandbox workspace-write -` from this repository directory and pipes the task context through stdin. Up to five local Codex runs can process queued tasks at once. Each task moves to In progress, Codex writes its final report back as an AI comment, and a successful run marks the task Complete. This is intended only for trusted local demos before the Hermes/server worker migration.
 
 ## Local Discord Demo Without Plane
 

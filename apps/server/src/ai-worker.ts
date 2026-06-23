@@ -1,9 +1,11 @@
 import crypto from "node:crypto";
 import type { AiClient } from "./ai.js";
 import { AiUnavailableError } from "./ai.js";
+import { collectReferencedItemIdsFromContextJsons } from "./collaboration-context.js";
 import { config } from "./config.js";
 import {
   getWorkItemById,
+  followWorkItem,
   insertActivityEvent,
   insertAiArtifact,
   insertAiJob,
@@ -29,15 +31,12 @@ import { emitProjectDeskEvent } from "./events.js";
 type LocalAiAction = "create_artifact" | "add_comment" | "update_stage" | "create_tasks" | "assign_owner" | "send_dm";
 
 const phaseActionRegistry: Record<WorkStage, LocalAiAction[]> = {
-  inbox: ["create_artifact", "add_comment"],
   review: ["create_artifact", "add_comment", "send_dm"],
-  validated: ["create_artifact", "add_comment", "send_dm"],
   planning: ["create_artifact", "add_comment", "create_tasks", "send_dm"],
   active: ["create_artifact", "add_comment", "create_tasks", "assign_owner", "send_dm"],
   reviewing: ["create_artifact", "add_comment", "send_dm"],
   done: ["create_artifact", "add_comment"],
-  parked: ["create_artifact", "add_comment"],
-  killed: ["create_artifact", "add_comment"]
+  parked: ["create_artifact", "add_comment"]
 };
 
 function canRunLocalAction(stage: WorkStage, action: LocalAiAction): boolean {
@@ -136,13 +135,25 @@ export class AiWorker {
     }
 
     try {
+      const comments = listWorkComments(workItem.id);
       const childItems = listWorkItemsByParent(workItem.id);
+      const referencedItems = collectReferencedItemIdsFromContextJsons(
+        [workItem.contextJson, ...comments.map((comment) => comment.contextJson)],
+        [workItem.id, ...childItems.map((item) => item.id)]
+      )
+        .map((id) => getWorkItemById(id))
+        .filter((item): item is WorkItemRecord => Boolean(item))
+        .map((item) => ({
+          item,
+          comments: listWorkComments(item.id)
+        }));
       let createdChildItems = false;
       const result = await this.ai.generate({
         workItem,
-        comments: listWorkComments(workItem.id),
+        comments,
         artifacts: listAiArtifacts(workItem.id),
         childItems,
+        referencedItems,
         jobType: job.type,
         reason: job.reason
       });
@@ -183,13 +194,23 @@ export class AiWorker {
             ownerDiscordUsername: workItem.ownerDiscordUsername ?? workItem.createdByDiscordUsername,
             title: task.title,
             details: task.details,
+            category: workItem.category,
             priority: task.priority,
+            codexReasoning: null,
             stage: "active",
+            taskStatus: "todo",
+            taskCompletionReason: null,
             planeIssueId: null,
             planeSequenceId: null,
             planeIdentifier: null,
             planeUrl: null
           });
+
+          followWorkItem(child.id, child.createdByDiscordUserId);
+
+          if (child.ownerDiscordUserId) {
+            followWorkItem(child.id, child.ownerDiscordUserId);
+          }
 
           insertActivityEvent({
             id: crypto.randomUUID(),

@@ -12,6 +12,8 @@ import type { RequestRecord } from "./db.js";
 
 interface DiscordGuildMember {
   roles?: string[];
+  nick?: string | null;
+  user?: DiscordApiUser & { bot?: boolean };
 }
 
 interface DiscordApiUser {
@@ -22,8 +24,19 @@ interface DiscordApiUser {
 }
 
 export interface DiscordUserProfile {
+  discordUserId?: string;
+  discordUsername?: string | null;
   displayName: string;
   avatarUrl: string | null;
+  isAdmin?: boolean;
+}
+
+export interface DiscordGuildPerson {
+  discordUserId: string;
+  discordUsername: string | null;
+  displayName: string;
+  avatarUrl: string | null;
+  isAdmin: boolean;
 }
 
 function discordAvatarUrl(discordUserId: string, avatarHash?: string | null): string | null {
@@ -72,6 +85,56 @@ export class DiscordService {
     return Array.isArray(member.roles) ? member.roles : [];
   }
 
+  async listGuildMembers(): Promise<DiscordGuildPerson[]> {
+    const members: DiscordGuildPerson[] = [];
+    let after = "0";
+
+    for (let page = 0; page < 5; page += 1) {
+      const url = new URL(`https://discord.com/api/v10/guilds/${config.discord.guildId}/members`);
+      url.searchParams.set("limit", "1000");
+      url.searchParams.set("after", after);
+
+      const response = await fetch(url, {
+        headers: {
+          Authorization: `Bot ${config.discord.botToken}`,
+          Accept: "application/json"
+        }
+      });
+
+      if (!response.ok) {
+        return members;
+      }
+
+      const pageMembers = (await response.json()) as DiscordGuildMember[];
+
+      if (pageMembers.length === 0) {
+        return members;
+      }
+
+      for (const member of pageMembers) {
+        if (!member.user || member.user.bot) {
+          continue;
+        }
+
+        members.push({
+          discordUserId: member.user.id,
+          discordUsername: member.user.username,
+          displayName: member.nick ?? member.user.global_name ?? member.user.username,
+          avatarUrl: discordAvatarUrl(member.user.id, member.user.avatar),
+          isAdmin: this.isAdmin(member.roles ?? [])
+        });
+      }
+
+      after = pageMembers[pageMembers.length - 1]?.user?.id ?? after;
+
+      if (pageMembers.length < 1000) {
+        return members;
+      }
+    }
+
+    return members;
+  }
+
   isAdmin(roles: string[]): boolean {
     return config.discord.adminRoleIds.some((roleId) => roles.includes(roleId));
   }
@@ -82,6 +145,8 @@ export class DiscordService {
         const user = await this.client.users.fetch(discordUserId);
 
         return {
+          discordUserId,
+          discordUsername: user.username,
           displayName: user.globalName ?? user.username,
           avatarUrl: user.displayAvatarURL({ size: 128 })
         };
@@ -104,6 +169,8 @@ export class DiscordService {
     const user = (await response.json()) as DiscordApiUser;
 
     return {
+      discordUserId: user.id,
+      discordUsername: user.username,
       displayName: user.global_name ?? user.username,
       avatarUrl: discordAvatarUrl(user.id, user.avatar)
     };
