@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { AiWorker } from "./ai-worker.js";
 import { AiUnavailableError, type AiClient } from "./ai.js";
+import { createActivitySessionToken, verifyActivitySessionToken } from "./activity-session.js";
 import {
   DiscordGuildMembershipLookupError,
   DiscordGuildMembershipRequiredError,
@@ -521,6 +522,27 @@ function requireAdmin(req: Request, res: Response, next: NextFunction): void {
   if (!user?.isAdmin) {
     res.status(403).json({ error: "Administrator role required." });
     return;
+  }
+
+  next();
+}
+
+function bearerToken(req: Request): string | null {
+  const header = req.get("authorization") ?? "";
+  const match = header.match(/^Bearer\s+(.+)$/i);
+
+  return match?.[1]?.trim() || null;
+}
+
+function hydrateActivitySession(req: Request, _res: Response, next: NextFunction): void {
+  const session = getSession(req);
+
+  if (!session.user) {
+    const user = verifyActivitySessionToken(bearerToken(req), config.sessionSecret);
+
+    if (user) {
+      session.user = user;
+    }
   }
 
   next();
@@ -1985,6 +2007,7 @@ export function createApp({ plane, discord, aiWorker, ai, taskRunner }: CreateAp
       maxAge: 1000 * 60 * 60 * 24 * 7
     })
   );
+  app.use(hydrateActivitySession);
 
   const api = express.Router();
   api.use(preventApiResponseCaching);
@@ -2156,6 +2179,7 @@ export function createApp({ plane, discord, aiWorker, ai, taskRunner }: CreateAp
 
     res.json({
       accessToken,
+      sessionToken: createActivitySessionToken(user, config.sessionSecret),
       user
     });
   });

@@ -31,6 +31,7 @@ import type {
   UploadedAttachment,
   WorkStage
 } from "./types";
+import { browserProjectDeskActivitySessionTokenStore } from "./discordActivityAuth";
 
 export class ApiError extends Error {
   constructor(
@@ -45,12 +46,14 @@ export class ApiError extends Error {
 
 async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const isFormDataBody = typeof FormData !== "undefined" && init.body instanceof FormData;
+  const activitySessionToken = browserProjectDeskActivitySessionTokenStore.read();
   const response = await fetch(path, {
     ...init,
     cache: "no-store",
     credentials: "include",
     headers: {
       "Cache-Control": "no-store",
+      ...(activitySessionToken ? { Authorization: `Bearer ${activitySessionToken}` } : {}),
       ...(init.body && !isFormDataBody ? { "Content-Type": "application/json" } : {}),
       ...init.headers
     }
@@ -102,6 +105,7 @@ export function getMe(): Promise<MeResponse> {
 
 export function exchangeDiscordActivityCode(code: string): Promise<{
   accessToken: string;
+  sessionToken?: string;
   user: CurrentUser;
 }> {
   return apiFetch("/api/auth/discord/activity", {
@@ -112,6 +116,7 @@ export function exchangeDiscordActivityCode(code: string): Promise<{
 
 export function establishDiscordActivitySession(accessToken: string): Promise<{
   accessToken: string;
+  sessionToken?: string;
   user: CurrentUser;
 }> {
   return apiFetch("/api/auth/discord/activity", {

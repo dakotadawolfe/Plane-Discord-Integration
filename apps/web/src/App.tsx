@@ -139,7 +139,11 @@ import type {
   WorkStage
 } from "./types";
 import { reportClientDiagnostic } from "./clientDiagnostics";
-import { browserDiscordActivityTokenStore, completeDiscordActivityLogin } from "./discordActivityAuth";
+import {
+  browserDiscordActivityTokenStore,
+  browserProjectDeskActivitySessionTokenStore,
+  completeDiscordActivityLogin
+} from "./discordActivityAuth";
 import { useDiscordActivity, type DiscordActivityState } from "./useDiscordActivity";
 
 const priorityOptions: { value: RequestPriority; label: string }[] = [
@@ -732,7 +736,12 @@ function App() {
   async function refreshMe() {
     setLoadingMe(true);
     try {
-      setMe(await getMe());
+      const payload = await getMe();
+      reportClientDiagnostic("me-refresh", {
+        authenticated: payload.authenticated,
+        hasUser: Boolean(payload.user)
+      });
+      setMe(payload);
     } finally {
       setLoadingMe(false);
     }
@@ -740,6 +749,7 @@ function App() {
 
   async function handleLogout() {
     browserDiscordActivityTokenStore.clear();
+    browserProjectDeskActivitySessionTokenStore.clear();
     await logout();
     await refreshMe();
   }
@@ -764,13 +774,15 @@ function App() {
         clientId: publicConfig.discordClientId,
         sdk: discordActivity.sdk,
         tokenStore: browserDiscordActivityTokenStore,
+        sessionTokenStore: browserProjectDeskActivitySessionTokenStore,
         exchangeCode: async (code) => {
-          const { accessToken } = await exchangeDiscordActivityCode(code);
-          return { accessToken };
+          const { accessToken, sessionToken } = await exchangeDiscordActivityCode(code);
+          return { accessToken, sessionToken };
         },
         establishSession: async (accessToken) => {
           reportClientDiagnostic("activity-login-establish-session");
-          await establishDiscordActivitySession(accessToken);
+          const { sessionToken } = await establishDiscordActivitySession(accessToken);
+          return { sessionToken };
         },
         fallbackLogin: () => {
           reportClientDiagnostic("activity-login-fallback");

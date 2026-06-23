@@ -2,6 +2,7 @@ import type { Types } from "@discord/embedded-app-sdk";
 
 export const discordActivityAuthScopes = ["identify", "guilds"] as const satisfies readonly Types.OAuthScopes[];
 const discordActivityAccessTokenStorageKey = "project-desk.discord-activity-access-token";
+const projectDeskActivitySessionTokenStorageKey = "project-desk.activity-session-token";
 
 interface DiscordActivitySdkLike {
   commands: {
@@ -34,12 +35,25 @@ export const browserDiscordActivityTokenStore: DiscordActivityTokenStore = {
   }
 };
 
+export const browserProjectDeskActivitySessionTokenStore: DiscordActivityTokenStore = {
+  read() {
+    return getBrowserLocalStorage()?.getItem(projectDeskActivitySessionTokenStorageKey) ?? null;
+  },
+  write(sessionToken: string) {
+    getBrowserLocalStorage()?.setItem(projectDeskActivitySessionTokenStorageKey, sessionToken);
+  },
+  clear() {
+    getBrowserLocalStorage()?.removeItem(projectDeskActivitySessionTokenStorageKey);
+  }
+};
+
 export async function completeDiscordActivityLogin(input: {
   clientId: string;
   sdk: DiscordActivitySdkLike;
-  exchangeCode: (code: string) => Promise<{ accessToken: string }>;
-  establishSession: (accessToken: string) => Promise<void>;
+  exchangeCode: (code: string) => Promise<{ accessToken: string; sessionToken?: string }>;
+  establishSession: (accessToken: string) => Promise<{ sessionToken?: string } | void>;
   tokenStore?: DiscordActivityTokenStore;
+  sessionTokenStore?: DiscordActivityTokenStore;
   fallbackLogin?: () => void;
 }): Promise<void> {
   let code: string;
@@ -64,12 +78,13 @@ export async function completeDiscordActivityLogin(input: {
   let accessToken: string;
 
   try {
-    ({ accessToken } = await input.exchangeCode(code));
+    const response = await input.exchangeCode(code);
+    accessToken = response.accessToken;
+    input.tokenStore?.write(accessToken);
+    writeSessionToken(input.sessionTokenStore, response.sessionToken);
   } catch (error) {
     throw describeDiscordActivityLoginError("Project Desk Activity token exchange", error);
   }
-
-  input.tokenStore?.write(accessToken);
 
   try {
     await input.sdk.commands.authenticate({ access_token: accessToken });
@@ -79,8 +94,9 @@ export async function completeDiscordActivityLogin(input: {
 }
 
 async function restoreDiscordActivitySession(input: {
-  establishSession: (accessToken: string) => Promise<void>;
+  establishSession: (accessToken: string) => Promise<{ sessionToken?: string } | void>;
   tokenStore?: DiscordActivityTokenStore;
+  sessionTokenStore?: DiscordActivityTokenStore;
   fallbackLogin?: () => void;
 }): Promise<void> {
   const accessToken = input.tokenStore?.read() ?? null;
@@ -91,10 +107,18 @@ async function restoreDiscordActivitySession(input: {
   }
 
   try {
-    await input.establishSession(accessToken);
+    const response = await input.establishSession(accessToken);
+    writeSessionToken(input.sessionTokenStore, response?.sessionToken);
   } catch (error) {
     input.tokenStore?.clear();
+    input.sessionTokenStore?.clear();
     throw describeDiscordActivityLoginError("Project Desk Activity session restore", error);
+  }
+}
+
+function writeSessionToken(store: DiscordActivityTokenStore | undefined, sessionToken: string | undefined): void {
+  if (sessionToken) {
+    store?.write(sessionToken);
   }
 }
 

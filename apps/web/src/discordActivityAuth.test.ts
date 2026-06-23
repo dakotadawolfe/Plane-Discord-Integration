@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   browserDiscordActivityTokenStore,
+  browserProjectDeskActivitySessionTokenStore,
   completeDiscordActivityLogin,
   describeDiscordActivityLoginError,
   discordActivityAuthScopes
@@ -27,10 +28,12 @@ test("formats object-shaped Discord SDK errors", () => {
 test("authorizes, exchanges the code, and authenticates a fresh Activity session", async () => {
   const calls: unknown[] = [];
   const tokenStore = createTokenStore(calls);
+  const sessionTokenStore = createSessionTokenStore(calls);
 
   await completeDiscordActivityLogin({
     clientId: "client-id",
     tokenStore,
+    sessionTokenStore,
     sdk: {
       commands: {
         authorize: async (input) => {
@@ -45,7 +48,7 @@ test("authorizes, exchanges the code, and authenticates a fresh Activity session
     },
     exchangeCode: async (code) => {
       calls.push(["exchangeCode", code]);
-      return { accessToken: "fresh-token" };
+      return { accessToken: "fresh-token", sessionToken: "fresh-session-token" };
     },
     establishSession: async (accessToken) => {
       calls.push(["establishSession", accessToken]);
@@ -65,6 +68,7 @@ test("authorizes, exchanges the code, and authenticates a fresh Activity session
     ],
     ["exchangeCode", "fresh-code"],
     ["writeToken", "fresh-token"],
+    ["writeSessionToken", "fresh-session-token"],
     ["authenticate", { access_token: "fresh-token" }]
   ]);
 });
@@ -72,10 +76,12 @@ test("authorizes, exchanges the code, and authenticates a fresh Activity session
 test("restores an already-authenticated Activity session from a stored token without reauthenticating Discord", async () => {
   const calls: unknown[] = [];
   const tokenStore = createTokenStore(calls, "stored-token");
+  const sessionTokenStore = createSessionTokenStore(calls);
 
   await completeDiscordActivityLogin({
     clientId: "client-id",
     tokenStore,
+    sessionTokenStore,
     sdk: {
       commands: {
         authorize: async () => {
@@ -92,12 +98,14 @@ test("restores an already-authenticated Activity session from a stored token wit
     },
     establishSession: async (accessToken) => {
       calls.push(["establishSession", accessToken]);
+      return { sessionToken: "restored-session-token" };
     }
   });
 
   assert.deepEqual(calls, [
     ["readToken"],
-    ["establishSession", "stored-token"]
+    ["establishSession", "stored-token"],
+    ["writeSessionToken", "restored-session-token"]
   ]);
 });
 
@@ -170,6 +178,9 @@ test("browser token store handles unavailable local storage", () => {
   assert.equal(browserDiscordActivityTokenStore.read(), null);
   assert.doesNotThrow(() => browserDiscordActivityTokenStore.write("token"));
   assert.doesNotThrow(() => browserDiscordActivityTokenStore.clear());
+  assert.equal(browserProjectDeskActivitySessionTokenStore.read(), null);
+  assert.doesNotThrow(() => browserProjectDeskActivitySessionTokenStore.write("session-token"));
+  assert.doesNotThrow(() => browserProjectDeskActivitySessionTokenStore.clear());
 });
 
 function createTokenStore(calls: unknown[], initialToken: string | null = null) {
@@ -186,6 +197,25 @@ function createTokenStore(calls: unknown[], initialToken: string | null = null) 
     },
     clear: () => {
       calls.push(["clearToken"]);
+      token = null;
+    }
+  };
+}
+
+function createSessionTokenStore(calls: unknown[], initialToken: string | null = null) {
+  let token = initialToken;
+
+  return {
+    read: () => {
+      calls.push(["readSessionToken"]);
+      return token;
+    },
+    write: (nextToken: string) => {
+      calls.push(["writeSessionToken", nextToken]);
+      token = nextToken;
+    },
+    clear: () => {
+      calls.push(["clearSessionToken"]);
       token = null;
     }
   };
