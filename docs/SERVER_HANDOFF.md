@@ -64,6 +64,7 @@ AI_EXECUTION_RUN_DIR=/var/lib/project-desk/ai-runs
 AI_EXECUTION_MAX_CONCURRENCY=5
 AI_EXECUTION_REQUIRE_ADMIN=true
 HERMES_TASK_PROVIDER=openai-codex
+HERMES_TASK_MODEL=
 
 LOCAL_CODEX_ENABLED=false
 SOURCE_SYNC_ENABLED=true
@@ -95,6 +96,8 @@ Task execution uses:
 ```
 
 Hermes/Codex credentials stay in the `discord` user account. Project Desk stores only server-side Hermes endpoint/config values.
+
+Leave `HERMES_TASK_MODEL` blank for OpenAI Codex ChatGPT accounts unless a specific model has been verified with Hermes. Project Desk will then omit `--model` and let Hermes use the logged-in Codex default.
 
 ## Cloudflare Tunnel
 

@@ -3,6 +3,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import { resolveHermesTaskModel } from "./config-helpers.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const serverDir = resolve(__dirname, "..");
@@ -302,7 +303,10 @@ export const config = {
     maxConcurrency: Math.min(aiExecutionMaxConcurrency, 5),
     requireAdmin: aiExecutionRequireAdmin,
     hermesTaskProvider: env.HERMES_TASK_PROVIDER,
-    hermesTaskModel: env.HERMES_TASK_MODEL ?? env.HERMES_MODEL
+    hermesTaskModel: resolveHermesTaskModel({
+      hermesModel: env.HERMES_MODEL,
+      hermesTaskModel: env.HERMES_TASK_MODEL
+    })
   },
   localCodex: {
     enabled: env.LOCAL_CODEX_ENABLED ? env.LOCAL_CODEX_ENABLED === "true" : true,
