@@ -138,7 +138,7 @@ import type {
   UserProfile,
   WorkStage
 } from "./types";
-import { completeDiscordActivityLogin } from "./discordActivityAuth";
+import { browserDiscordActivityTokenStore, completeDiscordActivityLogin } from "./discordActivityAuth";
 import { useDiscordActivity, type DiscordActivityState } from "./useDiscordActivity";
 
 const priorityOptions: { value: RequestPriority; label: string }[] = [
@@ -738,6 +738,7 @@ function App() {
   }
 
   async function handleLogout() {
+    browserDiscordActivityTokenStore.clear();
     await logout();
     await refreshMe();
   }
@@ -751,12 +752,16 @@ function App() {
     await completeDiscordActivityLogin({
       clientId: publicConfig.discordClientId,
       sdk: discordActivity.sdk,
+      tokenStore: browserDiscordActivityTokenStore,
       exchangeCode: async (code) => {
         const { accessToken } = await exchangeDiscordActivityCode(code);
         return { accessToken };
       },
       establishSession: async (accessToken) => {
         await establishDiscordActivitySession(accessToken);
+      },
+      fallbackLogin: () => {
+        login(window.location.pathname);
       }
     });
     await refreshMe();

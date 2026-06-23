@@ -1,6 +1,7 @@
 import type { Types } from "@discord/embedded-app-sdk";
 
 export const discordActivityAuthScopes = ["identify", "guilds"] as const satisfies readonly Types.OAuthScopes[];
+const discordActivityAccessTokenStorageKey = "project-desk.discord-activity-access-token";
 
 interface DiscordActivitySdkLike {
   commands: {
@@ -15,11 +16,31 @@ interface DiscordActivitySdkLike {
   };
 }
 
+export interface DiscordActivityTokenStore {
+  read(): string | null;
+  write(accessToken: string): void;
+  clear(): void;
+}
+
+export const browserDiscordActivityTokenStore: DiscordActivityTokenStore = {
+  read() {
+    return getBrowserLocalStorage()?.getItem(discordActivityAccessTokenStorageKey) ?? null;
+  },
+  write(accessToken: string) {
+    getBrowserLocalStorage()?.setItem(discordActivityAccessTokenStorageKey, accessToken);
+  },
+  clear() {
+    getBrowserLocalStorage()?.removeItem(discordActivityAccessTokenStorageKey);
+  }
+};
+
 export async function completeDiscordActivityLogin(input: {
   clientId: string;
   sdk: DiscordActivitySdkLike;
   exchangeCode: (code: string) => Promise<{ accessToken: string }>;
   establishSession: (accessToken: string) => Promise<void>;
+  tokenStore?: DiscordActivityTokenStore;
+  fallbackLogin?: () => void;
 }): Promise<void> {
   let code: string;
 
@@ -48,6 +69,8 @@ export async function completeDiscordActivityLogin(input: {
     throw describeDiscordActivityLoginError("Project Desk Activity token exchange", error);
   }
 
+  input.tokenStore?.write(accessToken);
+
   try {
     await input.sdk.commands.authenticate({ access_token: accessToken });
   } catch (error) {
@@ -58,13 +81,20 @@ export async function completeDiscordActivityLogin(input: {
 async function restoreDiscordActivitySession(input: {
   sdk: DiscordActivitySdkLike;
   establishSession: (accessToken: string) => Promise<void>;
+  tokenStore?: DiscordActivityTokenStore;
+  fallbackLogin?: () => void;
 }): Promise<void> {
-  let accessToken: string;
+  const accessToken = input.tokenStore?.read() ?? null;
+
+  if (!accessToken) {
+    input.fallbackLogin?.();
+    return;
+  }
 
   try {
-    const authentication = await input.sdk.commands.authenticate({ access_token: null });
-    accessToken = requireDiscordActivityAccessToken(authentication.access_token);
+    await input.sdk.commands.authenticate({ access_token: accessToken });
   } catch (error) {
+    input.tokenStore?.clear();
     throw describeDiscordActivityLoginError("Discord Activity session restore", error);
   }
 
@@ -92,12 +122,16 @@ function isAlreadyAuthenticatedError(error: unknown): boolean {
   );
 }
 
-function requireDiscordActivityAccessToken(accessToken: string | null | undefined): string {
-  if (!accessToken) {
-    throw new Error("Discord Activity did not return an access token.");
+function getBrowserLocalStorage(): Storage | null {
+  if (typeof window === "undefined") {
+    return null;
   }
 
-  return accessToken;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
 }
 
 function formatDiscordActivityError(error: unknown): string {
