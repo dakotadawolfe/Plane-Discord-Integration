@@ -145,6 +145,7 @@ import {
   completeDiscordActivityLogin
 } from "./discordActivityAuth";
 import { useDiscordActivity, type DiscordActivityState } from "./useDiscordActivity";
+import { shouldAutoStartActivityLogin } from "./activityAutoLogin";
 
 const priorityOptions: { value: RequestPriority; label: string }[] = [
   { value: "urgent", label: "Urgent" },
@@ -705,6 +706,10 @@ function App() {
   const [inboxUnreadCount, setInboxUnreadCount] = useState(0);
   const [annotationSession, setAnnotationSession] = useState<AnnotationSession | null>(null);
   const [annotationTaskDraft, setAnnotationTaskDraft] = useState<AnnotationTaskDraft | null>(null);
+  const [activityLoginInProgress, setActivityLoginInProgress] = useState(false);
+  const [activityLoginError, setActivityLoginError] = useState<string | null>(null);
+  const activityAutoLoginAttemptedRef = useRef(false);
+  const activityLoginInFlightRef = useRef(false);
   const user = me?.user ?? null;
 
   useEffect(() => {
@@ -755,21 +760,28 @@ function App() {
   }
 
   async function handleLogin() {
-    if (!publicConfig?.discordClientId || !discordActivity.embedded || !discordActivity.ready || !discordActivity.sdk) {
-      reportClientDiagnostic("login-browser-redirect", {
-        embedded: discordActivity.embedded,
-        ready: discordActivity.ready,
-        hasSdk: Boolean(discordActivity.sdk)
-      });
-      login(window.location.pathname);
+    if (activityLoginInFlightRef.current) {
       return;
     }
 
-    reportClientDiagnostic("activity-login-start", {
-      ready: discordActivity.ready
-    });
-
+    activityLoginInFlightRef.current = true;
+    setActivityLoginInProgress(true);
+    setActivityLoginError(null);
     try {
+      if (!publicConfig?.discordClientId || !discordActivity.embedded || !discordActivity.ready || !discordActivity.sdk) {
+        reportClientDiagnostic("login-browser-redirect", {
+          embedded: discordActivity.embedded,
+          ready: discordActivity.ready,
+          hasSdk: Boolean(discordActivity.sdk)
+        });
+        login(window.location.pathname);
+        return;
+      }
+
+      reportClientDiagnostic("activity-login-start", {
+        ready: discordActivity.ready
+      });
+
       await completeDiscordActivityLogin({
         clientId: publicConfig.discordClientId,
         sdk: discordActivity.sdk,
@@ -795,7 +807,11 @@ function App() {
       reportClientDiagnostic("activity-login-error", {
         message: error instanceof Error ? error.message : error
       });
+      setActivityLoginError(error instanceof Error ? error.message : "Discord login failed.");
       throw error;
+    } finally {
+      activityLoginInFlightRef.current = false;
+      setActivityLoginInProgress(false);
     }
   }
 
@@ -807,6 +823,34 @@ function App() {
       setInboxUnreadCount(0);
     }
   }
+
+  useEffect(() => {
+    if (
+      !shouldAutoStartActivityLogin({
+        loadingMe,
+        hasUser: Boolean(user),
+        embedded: discordActivity.embedded,
+        ready: discordActivity.ready,
+        hasSdk: Boolean(discordActivity.sdk),
+        hasClientId: Boolean(publicConfig?.discordClientId),
+        attempted: activityAutoLoginAttemptedRef.current,
+        inFlight: activityLoginInFlightRef.current
+      })
+    ) {
+      return;
+    }
+
+    activityAutoLoginAttemptedRef.current = true;
+    reportClientDiagnostic("activity-auto-login-start");
+
+    void handleLogin()
+      .then(() => reportClientDiagnostic("activity-auto-login-success"))
+      .catch((error) => {
+        reportClientDiagnostic("activity-auto-login-error", {
+          message: error instanceof Error ? error.message : error
+        });
+      });
+  }, [loadingMe, user, discordActivity.embedded, discordActivity.ready, discordActivity.sdk, publicConfig?.discordClientId]);
 
   function startAnnotationSession(session: AnnotationSession) {
     setAnnotationSession({
@@ -854,7 +898,7 @@ function App() {
   if (!user) {
     return (
       <main className="login-shell">
-        <LoginPanel onLogin={handleLogin} activity={discordActivity} />
+        <LoginPanel onLogin={handleLogin} activity={discordActivity} busy={activityLoginInProgress} externalError={activityLoginError} />
       </main>
     );
   }
@@ -3425,9 +3469,20 @@ function withCurrentUserAsKnownPerson(people: KnownPerson[], user: CurrentUser):
   );
 }
 
-function LoginPanel({ onLogin, activity }: { onLogin: () => Promise<void>; activity: DiscordActivityState }) {
+function LoginPanel({
+  onLogin,
+  activity,
+  busy = false,
+  externalError = null
+}: {
+  onLogin: () => Promise<void>;
+  activity: DiscordActivityState;
+  busy?: boolean;
+  externalError?: string | null;
+}) {
   const [loggingIn, setLoggingIn] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const isWorking = loggingIn || busy;
 
   async function handleClick() {
     setLoggingIn(true);
@@ -3448,10 +3503,10 @@ function LoginPanel({ onLogin, activity }: { onLogin: () => Promise<void>; activ
       <h1>Log in with Discord</h1>
       {activity.embedded && !activity.ready ? <p className="muted">Connecting to Discord</p> : null}
       {activity.error ? <p className="error-text">{activity.error}</p> : null}
-      {error ? <p className="error-text">{error}</p> : null}
-      <button className="primary-button" onClick={() => void handleClick()} disabled={loggingIn || (activity.embedded && !activity.ready)}>
-        {loggingIn ? <RefreshCw size={16} className="spin" /> : <LogIn size={16} />}
-        {loggingIn ? "Continuing" : "Continue"}
+      {externalError || error ? <p className="error-text">{externalError ?? error}</p> : null}
+      <button className="primary-button" onClick={() => void handleClick()} disabled={isWorking || (activity.embedded && !activity.ready)}>
+        {isWorking ? <RefreshCw size={16} className="spin" /> : <LogIn size={16} />}
+        {isWorking ? "Continuing" : "Continue"}
       </button>
     </section>
   );
