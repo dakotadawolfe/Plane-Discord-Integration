@@ -55,6 +55,13 @@ Required variables:
 | `HERMES_API_BASE_URL` | Hermes OpenAI-compatible API base URL, usually `http://127.0.0.1:9119/v1` |
 | `HERMES_API_KEY` | Server-only API key for Hermes, if the API server requires one |
 | `HERMES_MODEL` | Hermes model id, default `hermes-agent` |
+| `AI_EXECUTION_PROVIDER` | `local`, `hermes`, or `disabled`; controls who executes assigned Project Desk AI tasks |
+| `AI_EXECUTION_COMMAND` | CLI command for task execution, usually `codex` locally or `hermes` on the server |
+| `AI_EXECUTION_WORKSPACE_DIR` | Repository/worktree used by AI task execution |
+| `AI_EXECUTION_RUN_DIR` | Private directory where large task briefs are written for Hermes |
+| `AI_EXECUTION_TIMEOUT_SECONDS` | AI task execution timeout, default `1200` |
+| `AI_EXECUTION_MAX_CONCURRENCY` | Maximum simultaneous AI task runners, capped at `5` |
+| `AI_EXECUTION_REQUIRE_ADMIN` | Set `false` only on trusted servers if non-admins may assign tasks to Project Desk AI |
 | `LOCAL_CODEX_ENABLED` | Set `true` to allow Administrator task assignment to launch local `codex exec` |
 | `LOCAL_CODEX_COMMAND` | Optional Codex CLI command or full path; blank auto-discovers the Codex app CLI on Windows before falling back to `codex` |
 | `LOCAL_CODEX_WORKSPACE_DIR` | Workspace used by local Codex runs, default repo root |
@@ -80,6 +87,10 @@ Optional variables:
 | `COOKIE_SECURE` | `true` in production | Set to `true` behind HTTPS |
 | `COOKIE_SAMESITE` | `none` in production, `lax` in dev | Use `none` for Discord iframe hosting over HTTPS |
 | `REQUEST_BODY_LIMIT` | `50mb` | Max JSON request body size; large files should still use attachments |
+| `SOURCE_SYNC_ENABLED` | `true` | Enables the admin settings Source Sync buttons |
+| `SOURCE_SYNC_REPO_DIR` | `.` | Repo directory used by Source Sync |
+| `SOURCE_SYNC_REMOTE` | `origin` | Git remote used by Source Sync |
+| `SOURCE_SYNC_BRANCH` | `main` | Git branch used by Source Sync |
 
 ## Discord Setup
 
@@ -118,11 +129,23 @@ HERMES_API_KEY=<server-only-key-if-required>
 HERMES_MODEL=hermes-agent
 ```
 
+For server-side task execution through Hermes, also set:
+
+```text
+AI_EXECUTION_PROVIDER=hermes
+AI_EXECUTION_COMMAND=/home/discord/.local/bin/hermes
+AI_EXECUTION_WORKSPACE_DIR=/opt/project-desk
+AI_EXECUTION_RUN_DIR=/var/lib/project-desk/ai-runs
+AI_EXECUTION_MAX_CONCURRENCY=5
+AI_EXECUTION_REQUIRE_ADMIN=true
+```
+
 Never put Codex OAuth tokens, OpenAI keys, Hermes auth files, cookies, or other provider secrets in Project Desk data, Discord messages, or frontend code.
 
 Temporary local-PC Codex bridge:
 
 ```text
+AI_EXECUTION_PROVIDER=local
 LOCAL_CODEX_ENABLED=true
 LOCAL_CODEX_COMMAND=
 LOCAL_CODEX_WORKSPACE_DIR=.
@@ -130,7 +153,17 @@ LOCAL_CODEX_MAX_CONCURRENCY=5
 LOCAL_CODEX_REQUIRE_ADMIN=true
 ```
 
-When an Administrator assigns a task to **Project Desk AI**, the backend runs `codex --ask-for-approval never exec --sandbox workspace-write -` from this repository directory and pipes the task context through stdin. Up to five local Codex runs can process queued tasks at once. Each task moves to In progress, Codex writes its final report back as an AI comment, and a successful run marks the task Complete. This is intended only for trusted local demos before the Hermes/server worker migration.
+When an Administrator assigns a task to **Project Desk AI**, the backend queues that task for the configured execution provider. Local mode runs `codex --ask-for-approval never exec --sandbox workspace-write -`; server mode runs `hermes chat --accept-hooks --yolo` with the task brief written to a private run directory. Up to five runs can process queued tasks at once. Each task moves to In progress, AI writes its final report back as a comment, and a successful run marks the task Complete.
+
+## Server Source Sync
+
+Administrators can open Settings and use Source Sync to:
+
+- sync app code from GitHub and restart Project Desk;
+- sync safe app code changes back to GitHub;
+- restart Project Desk.
+
+Source Sync stages only app and doc paths (`apps/`, `docs/`, package metadata, `.env.example`, `.gitignore`, `README.md`, and `SOUL.md`). It refuses to sync env files, SQLite databases, uploads, obvious secret-looking diffs, or runtime data. GitHub auth must be configured on the server so `git push` works non-interactively.
 
 ## Local Discord Demo Without Plane
 

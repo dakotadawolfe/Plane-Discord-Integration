@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { readdirSync, statSync } from "node:fs";
+import { mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { collectReferencedItemIdsFromContextJsons } from "./collaboration-context.js";
 import { config } from "./config.js";
 import {
   getWorkItemById,
+  getWorkItemMemory,
   insertInboxNotification,
   insertActivityEvent,
   insertWorkComment,
@@ -24,6 +25,13 @@ import {
   type RequestPriority
 } from "./domain.js";
 import { emitProjectDeskEvent } from "./events.js";
+import type {
+  AiTaskOutputEntry,
+  AiTaskOutputListener,
+  AiTaskRunner,
+  AiTaskRunSnapshot,
+  AiTaskRunStatus
+} from "./task-runner.js";
 
 interface QueuedCodexTask {
   workItemId: string;
@@ -40,40 +48,16 @@ interface ProcessResult {
   timedOut: boolean;
 }
 
-export type LocalCodexRunStatus =
-  | "idle"
-  | "queued"
-  | "running"
-  | "succeeded"
-  | "restart_required"
-  | "failed"
-  | "timed_out"
-  | "start_failed";
-
-export interface LocalCodexOutputEntry {
-  id: string;
-  stream: "system" | "stdout" | "stderr";
-  text: string;
-  at: string;
-}
-
-export interface LocalCodexRunSnapshot {
-  workItemId: string;
-  status: LocalCodexRunStatus;
-  reason: string | null;
-  startedAt: string | null;
-  endedAt: string | null;
-  output: LocalCodexOutputEntry[];
-}
-
-type LocalCodexOutputListener = (
-  eventName: "snapshot" | "output",
-  payload: LocalCodexRunSnapshot | LocalCodexOutputEntry
-) => void;
+export type LocalCodexRunStatus = AiTaskRunStatus;
+export type LocalCodexOutputEntry = AiTaskOutputEntry;
+export type LocalCodexRunSnapshot = AiTaskRunSnapshot;
+type LocalCodexOutputListener = AiTaskOutputListener;
 
 interface LocalCodexRunState extends LocalCodexRunSnapshot {
   output: LocalCodexOutputEntry[];
 }
+
+type RunnerProvider = "local" | "hermes";
 
 const maxCapturedOutput = 18_000;
 const maxLiveOutputEntries = 500;
@@ -145,21 +129,21 @@ function visibleCodexTextFromChunk(value: string): string {
       continue;
     }
 
-    const codexLine = line.match(/^(?:codex|assistant|project desk ai)\b[:\s-]*(.*)$/i);
+    const codexLine = line.match(/^(?:codex|hermes|assistant|project desk ai)\b[:\s-]*(.*)$/i);
 
     if (codexLine) {
       const message = (codexLine[1] ?? "").trim();
       inCodexBlock = true;
 
       if (message) {
-        visible.push(`Codex: ${message}`);
+        visible.push(`AI: ${message}`);
       }
 
       continue;
     }
 
     if (inCodexBlock) {
-      visible.push(`Codex: ${line}`);
+      visible.push(`AI: ${line}`);
     }
   }
 
@@ -291,7 +275,28 @@ function codexCommandArgs(reasoning: CodexReasoningEffort): string[] {
   ];
 }
 
-function buildPrompt(task: WorkItemRecord, parent: WorkItemRecord | null, reasoning: CodexReasoningEffort): string {
+function runnerIntro(provider: RunnerProvider): string[] {
+  if (provider === "hermes") {
+    return [
+      "You are Project Desk AI running through Hermes on the Project Desk server.",
+      "Use the configured Project Desk repository directory as your workspace. You may act autonomously inside this repo and may use sudo if the host policy allows it.",
+      "Do not ask for permission or credentials. If an external login, missing secret, or human-only approval is required, record the blocker clearly and stop that specific action."
+    ];
+  }
+
+  return [
+    "You are running from Project Desk as the local Codex task runner on Dakota's PC.",
+    "Use the current repository directory as your workspace. Keep edits scoped to this Project Desk repo.",
+    "Do not ask for permission or credentials. If an external login, missing secret, or human-only approval is required, record the blocker clearly and stop that specific action."
+  ];
+}
+
+function compactMemory(workItemId: string, label: string): string {
+  const memory = getWorkItemMemory(workItemId);
+  return memory?.body ? `${label} scoped memory:\n${memory.body.slice(0, 4000)}` : "";
+}
+
+function buildPrompt(task: WorkItemRecord, parent: WorkItemRecord | null, reasoning: CodexReasoningEffort, provider: RunnerProvider): string {
   const taskCommentRecords = listWorkComments(task.id);
   const parentCommentRecords = parent ? listWorkComments(parent.id) : [];
   const taskComments = taskCommentRecords.slice(-20).map(compactComment);
@@ -318,8 +323,7 @@ function buildPrompt(task: WorkItemRecord, parent: WorkItemRecord | null, reason
     .map(compactTaskWithComments);
 
   return [
-    "You are running from Project Desk as the local Codex task runner on Dakota's PC.",
-    "Use the current repository directory as your workspace. Keep edits scoped to this Project Desk repo.",
+    ...runnerIntro(provider),
     "Do not commit, push, rewrite git history, or change secrets. Do not reveal secrets from .env files, auth files, logs, or local config.",
     "If the task is unsafe, unclear, or not actionable in this repository, do not make code changes; explain what is needed instead.",
     "When you finish, return a concise Markdown report with: summary, files changed, verification run, and anything blocked.",
@@ -327,9 +331,10 @@ function buildPrompt(task: WorkItemRecord, parent: WorkItemRecord | null, reason
     `Task: ${task.title}`,
     `Task id: ${task.id}`,
     `Priority: ${task.priority}`,
-    `Codex reasoning effort: ${codexReasoningLabel(reasoning)} (${reasoning})`,
+    `AI reasoning effort: ${codexReasoningLabel(reasoning)} (${reasoning})`,
     `Details:\n${task.details}`,
     task.contextJson ? `Task context JSON:\n${task.contextJson}` : "",
+    compactMemory(task.id, "Task"),
     `Current task status: ${task.taskStatus ?? "none"}`,
     `Assigned to: ${task.ownerDiscordUsername ?? "Unassigned"}`,
     parent
@@ -342,6 +347,7 @@ function buildPrompt(task: WorkItemRecord, parent: WorkItemRecord | null, reason
           `Parent priority: ${parent.priority}`,
           `Parent assigned to: ${parent.ownerDiscordUsername ?? "Unassigned"}`,
           `Parent details:\n${parent.details}`,
+          compactMemory(parent.id, `Parent ${parent.kind}`),
           parent.contextJson ? `Parent context JSON:\n${parent.contextJson}` : ""
         ].join("\n")
       : "",
@@ -355,7 +361,7 @@ function buildPrompt(task: WorkItemRecord, parent: WorkItemRecord | null, reason
     .join("\n");
 }
 
-function resultComment(result: ProcessResult, restartRequired: boolean): string {
+function resultComment(result: ProcessResult, restartRequired: boolean, runnerLabel: string): string {
   const cleanStdout = sanitizeCodexOutput(result.stdout);
   const cleanStderr = sanitizeCodexOutput(result.stderr);
   const status = restartRequired
@@ -366,12 +372,12 @@ function resultComment(result: ProcessResult, restartRequired: boolean): string 
       ? "Completed"
       : `Exited with ${result.exitCode ?? result.signal ?? "unknown status"}`;
 
-  const sections = [`## Local Codex Run`, `**Status:** ${status}`];
+  const sections = [`## ${runnerLabel} Run`, `**Status:** ${status}`];
 
   if (cleanStdout) {
     sections.push("", cleanStdout);
   } else {
-    sections.push("", "_Codex did not print a final message._");
+    sections.push("", `_${runnerLabel} did not print a final message._`);
   }
 
   if (cleanStderr && result.exitCode !== 0) {
@@ -408,20 +414,68 @@ function hasModifiedFileSince(path: string, sinceMs: number): boolean {
   }
 }
 
-function needsBackendRestartSince(sinceMs: number): boolean {
-  const workspaceDir = resolve(config.localCodex.workspaceDir);
-  const fileChanged = restartSensitiveFiles.some((path) => hasModifiedFileSince(resolve(workspaceDir, path), sinceMs));
-  const directoryChanged = restartSensitiveDirectories.some((path) => hasModifiedFileSince(resolve(workspaceDir, path), sinceMs));
+function needsBackendRestartSince(sinceMs: number, workspaceDir: string): boolean {
+  const resolvedWorkspaceDir = resolve(workspaceDir);
+  const fileChanged = restartSensitiveFiles.some((path) => hasModifiedFileSince(resolve(resolvedWorkspaceDir, path), sinceMs));
+  const directoryChanged = restartSensitiveDirectories.some((path) => hasModifiedFileSince(resolve(resolvedWorkspaceDir, path), sinceMs));
 
   return fileChanged || directoryChanged;
 }
 
-export class LocalCodexRunner {
+export class LocalCodexRunner implements AiTaskRunner {
   private readonly queue: QueuedCodexTask[] = [];
   private readonly queuedIds = new Set<string>();
   private readonly runs = new Map<string, LocalCodexRunState>();
   private readonly listeners = new Map<string, Set<LocalCodexOutputListener>>();
   private activeCount = 0;
+
+  constructor(private readonly provider: RunnerProvider = "local") {}
+
+  get label(): string {
+    return this.provider === "hermes" ? "Hermes" : "local Codex";
+  }
+
+  get enabled(): boolean {
+    return this.provider === "hermes"
+      ? config.aiExecution.provider === "hermes"
+      : config.aiExecution.provider === "local" && config.localCodex.enabled;
+  }
+
+  get requireAdmin(): boolean {
+    return config.aiExecution.requireAdmin;
+  }
+
+  private get command(): string {
+    return this.provider === "hermes" ? config.aiExecution.command : config.localCodex.command;
+  }
+
+  private get workspaceDir(): string {
+    return this.provider === "hermes" ? config.aiExecution.workspaceDir : config.localCodex.workspaceDir;
+  }
+
+  private get timeoutMs(): number {
+    return this.provider === "hermes" ? config.aiExecution.timeoutMs : config.localCodex.timeoutMs;
+  }
+
+  private get maxConcurrency(): number {
+    return this.provider === "hermes" ? config.aiExecution.maxConcurrency : config.localCodex.maxConcurrency;
+  }
+
+  private get queuedEventType(): string {
+    return this.provider === "hermes" ? "hermes_task_queued" : "local_codex_queued";
+  }
+
+  private get startedEventType(): string {
+    return this.provider === "hermes" ? "hermes_task_started" : "local_codex_started";
+  }
+
+  private get completedEventType(): string {
+    return this.provider === "hermes" ? "hermes_task_completed" : "local_codex_completed";
+  }
+
+  private get failedEventType(): string {
+    return this.provider === "hermes" ? "hermes_task_failed" : "local_codex_failed";
+  }
 
   getSnapshot(workItemId: string): LocalCodexRunSnapshot {
     const run = this.runs.get(workItemId);
@@ -459,36 +513,36 @@ export class LocalCodexRunner {
   }
 
   enqueueTask(workItemId: string, actorName: string, reason: string): { queued: boolean; reason?: string } {
-    if (!config.localCodex.enabled) {
-      return { queued: false, reason: "Local Codex runner is disabled." };
+    if (!this.enabled) {
+      return { queued: false, reason: `${this.label} runner is disabled.` };
     }
 
     if (this.queuedIds.has(workItemId)) {
-      return { queued: false, reason: "Local Codex is already queued or running for this task." };
+      return { queued: false, reason: `${this.label} is already queued or running for this task.` };
     }
 
     const task = getWorkItemById(workItemId);
 
     if (!task || task.kind !== "task") {
-      return { queued: false, reason: "Only tasks can be assigned to local Codex." };
+      return { queued: false, reason: `Only tasks can be assigned to ${this.label}.` };
     }
 
     this.startRun(workItemId, reason);
     this.queue.push({ workItemId, actorName, reason, queuedAt: new Date().toISOString() });
     this.queuedIds.add(workItemId);
 
-    this.appendRunOutput(workItemId, "system", `${projectDeskAiDisplayName} queued a local Codex run for this task.\n`);
+    this.appendRunOutput(workItemId, "system", `${projectDeskAiDisplayName} queued a ${this.label} run for this task.\n`);
     insertSystemComment(
       workItemId,
-      `${projectDeskAiDisplayName} queued a local Codex run for this task.`
+      `${projectDeskAiDisplayName} queued a ${this.label} run for this task.`
     );
     insertActivityEvent({
       id: crypto.randomUUID(),
       workItemId,
-      type: "local_codex_queued",
+      type: this.queuedEventType,
       actorName,
       body: reason,
-      metadataJson: JSON.stringify({ workspaceDir: config.localCodex.workspaceDir })
+      metadataJson: JSON.stringify({ provider: this.provider, workspaceDir: this.workspaceDir })
     });
 
     emitProjectDeskEvent({ type: "work_item_changed", workItemId });
@@ -517,7 +571,7 @@ export class LocalCodexRunner {
     status: LocalCodexRunStatus,
     options: { startedAt?: string | null; endedAt?: string | null } = {}
   ): void {
-    const run = this.runs.get(workItemId) ?? this.startRun(workItemId, "Local Codex run.");
+    const run = this.runs.get(workItemId) ?? this.startRun(workItemId, `${this.label} run.`);
     run.status = status;
 
     if (options.startedAt !== undefined) {
@@ -538,7 +592,7 @@ export class LocalCodexRunner {
       return;
     }
 
-    const run = this.runs.get(workItemId) ?? this.startRun(workItemId, "Local Codex run.");
+    const run = this.runs.get(workItemId) ?? this.startRun(workItemId, `${this.label} run.`);
     const entry: LocalCodexOutputEntry = {
       id: crypto.randomUUID(),
       stream,
@@ -575,12 +629,12 @@ export class LocalCodexRunner {
   }
 
   private processQueue(): void {
-    while (this.queue.length > 0 && this.activeCount < config.localCodex.maxConcurrency) {
+    while (this.queue.length > 0 && this.activeCount < this.maxConcurrency) {
       const task = this.dequeueNextTask()!;
       this.activeCount += 1;
       void this.runQueuedTask(task)
         .catch((error) => {
-          console.error("Unhandled local Codex task failure.", error);
+          console.error(`Unhandled ${this.label} task failure.`, error);
         })
         .finally(() => {
           this.activeCount -= 1;
@@ -624,27 +678,29 @@ export class LocalCodexRunner {
     const reasoning = task.codexReasoning ?? "medium";
     const runStartedAtMs = Date.now();
     const startedAt = new Date(runStartedAtMs).toISOString();
+    const runnerLabel = this.label;
 
     this.setRunStatus(task.id, "running", { startedAt, endedAt: null });
     updateWorkItemTaskStatus(task.id, "in_progress", null);
     this.appendRunOutput(
       task.id,
       "system",
-      `${projectDeskAiDisplayName} started local Codex in ${config.localCodex.workspaceDir} with ${codexReasoningLabel(reasoning)} reasoning.\n`
+      `${projectDeskAiDisplayName} started ${runnerLabel} in ${this.workspaceDir} with ${codexReasoningLabel(reasoning)} reasoning.\n`
     );
     insertSystemComment(
       task.id,
-      `${projectDeskAiDisplayName} started local Codex in \`${config.localCodex.workspaceDir}\` with ${codexReasoningLabel(reasoning)} reasoning.`
+      `${projectDeskAiDisplayName} started ${runnerLabel} in \`${this.workspaceDir}\` with ${codexReasoningLabel(reasoning)} reasoning.`
     );
     insertActivityEvent({
       id: crypto.randomUUID(),
       workItemId: task.id,
-      type: "local_codex_started",
+      type: this.startedEventType,
       actorName: projectDeskAiDisplayName,
       body: taskRef.reason,
       metadataJson: JSON.stringify({
-        command: config.localCodex.command,
-        workspaceDir: config.localCodex.workspaceDir,
+        provider: this.provider,
+        command: this.command,
+        workspaceDir: this.workspaceDir,
         reasoningEffort: reasoning,
         priority: task.priority
       })
@@ -653,12 +709,12 @@ export class LocalCodexRunner {
     emitProjectDeskEvent({ type: "work_item_changed", workItemId: task.id });
 
     try {
-      const result = await this.runCodex(task.id, buildPrompt(task, parent, reasoning), reasoning);
+      const result = await this.runTaskCommand(task.id, buildPrompt(task, parent, reasoning, this.provider), reasoning);
 
       const succeeded = result.exitCode === 0 && !result.timedOut;
-      const restartRequired = succeeded && needsBackendRestartSince(runStartedAtMs);
+      const restartRequired = succeeded && needsBackendRestartSince(runStartedAtMs, this.workspaceDir);
 
-      insertAiComment(task.id, resultComment(result, restartRequired));
+      insertAiComment(task.id, resultComment(result, restartRequired, runnerLabel));
 
       if (succeeded) {
         updateWorkItemTaskStatus(task.id, "complete", "done");
@@ -683,22 +739,23 @@ export class LocalCodexRunner {
         task.id,
         "system",
         restartRequired
-          ? "Local Codex finished. Restart the backend npm server to apply server changes.\n"
+          ? `${runnerLabel} finished. Restart the backend npm server to apply server changes.\n`
           : result.timedOut
-            ? "Local Codex timed out.\n"
-            : `Local Codex exited with ${result.exitCode ?? result.signal ?? "unknown status"}.\n`
+            ? `${runnerLabel} timed out.\n`
+            : `${runnerLabel} exited with ${result.exitCode ?? result.signal ?? "unknown status"}.\n`
       );
       insertActivityEvent({
         id: crypto.randomUUID(),
         workItemId: task.id,
-        type: succeeded ? "local_codex_completed" : "local_codex_failed",
+        type: succeeded ? this.completedEventType : this.failedEventType,
         actorName: projectDeskAiDisplayName,
         body: restartRequired
-          ? "Local Codex finished. Restart the backend npm server to apply server changes."
+          ? `${runnerLabel} finished. Restart the backend npm server to apply server changes.`
           : result.timedOut
-            ? "Local Codex timed out."
-            : `Local Codex exited with ${result.exitCode ?? result.signal ?? "unknown status"}.`,
+            ? `${runnerLabel} timed out.`
+            : `${runnerLabel} exited with ${result.exitCode ?? result.signal ?? "unknown status"}.`,
         metadataJson: JSON.stringify({
+          provider: this.provider,
           exitCode: result.exitCode,
           signal: result.signal,
           timedOut: result.timedOut,
@@ -707,7 +764,7 @@ export class LocalCodexRunner {
         })
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Local Codex failed to start.";
+      const message = error instanceof Error ? error.message : `${runnerLabel} failed to start.`;
 
       this.setRunStatus(task.id, "start_failed", { endedAt: new Date().toISOString() });
       this.appendRunOutput(task.id, "system", `${message}\n`);
@@ -715,21 +772,26 @@ export class LocalCodexRunner {
       insertAiComment(
         task.id,
         [
-          "## Local Codex Run",
+          `## ${runnerLabel} Run`,
           "**Status:** Failed to start",
           "",
           message,
           "",
-          `Command attempted: \`${config.localCodex.command} ${codexCommandArgs(reasoning).join(" ")}\``
+          `Command attempted: \`${this.command} ${this.commandArgs(reasoning).join(" ")}\``
         ].join("\n")
       );
       insertActivityEvent({
         id: crypto.randomUUID(),
         workItemId: task.id,
-        type: "local_codex_failed",
+        type: this.failedEventType,
         actorName: projectDeskAiDisplayName,
         body: message,
-        metadataJson: JSON.stringify({ command: config.localCodex.command, workspaceDir: config.localCodex.workspaceDir, reasoningEffort: reasoning })
+        metadataJson: JSON.stringify({
+          provider: this.provider,
+          command: this.command,
+          workspaceDir: this.workspaceDir,
+          reasoningEffort: reasoning
+        })
       });
     }
 
@@ -737,14 +799,61 @@ export class LocalCodexRunner {
     emitProjectDeskEvent({ type: "work_item_changed", workItemId: task.id });
   }
 
-  private runCodex(workItemId: string, prompt: string, reasoning: CodexReasoningEffort): Promise<ProcessResult> {
+  private commandArgs(reasoning: CodexReasoningEffort, promptPath?: string): string[] {
+    if (this.provider === "hermes") {
+      const args = [
+        "chat",
+        "--query",
+        [
+          "Read the Project Desk task brief from this file and complete the work autonomously:",
+          promptPath ?? "(prompt file unavailable)",
+          "",
+          "Keep your final answer concise and focused on what changed, verification, and blockers."
+        ].join("\n"),
+        "--worktree",
+        this.workspaceDir,
+        "--accept-hooks",
+        "--yolo",
+        "--quiet",
+        "--source",
+        "project-desk"
+      ];
+
+      if (config.aiExecution.hermesTaskProvider) {
+        args.push("--provider", config.aiExecution.hermesTaskProvider);
+      }
+
+      if (config.aiExecution.hermesTaskModel) {
+        args.push("--model", config.aiExecution.hermesTaskModel);
+      }
+
+      return args;
+    }
+
+    return codexCommandArgs(reasoning);
+  }
+
+  private writePromptFile(workItemId: string, prompt: string): string {
+    mkdirSync(config.aiExecution.runDir, { recursive: true, mode: 0o700 });
+    const promptPath = resolve(config.aiExecution.runDir, `${workItemId}-${Date.now()}-${crypto.randomUUID()}.md`);
+    writeFileSync(promptPath, prompt, { encoding: "utf8", mode: 0o600 });
+    return promptPath;
+  }
+
+  private runTaskCommand(workItemId: string, prompt: string, reasoning: CodexReasoningEffort): Promise<ProcessResult> {
     return new Promise((resolve, reject) => {
+      const promptPath = this.provider === "hermes" ? this.writePromptFile(workItemId, prompt) : null;
+      const args = this.commandArgs(reasoning, promptPath ?? undefined);
       const child = spawn(
-        config.localCodex.command,
-        codexCommandArgs(reasoning),
+        this.command,
+        args,
         {
-          cwd: config.localCodex.workspaceDir,
-          env: { ...process.env, RUST_LOG: process.env.RUST_LOG ?? "error" },
+          cwd: this.workspaceDir,
+          env: {
+            ...process.env,
+            HERMES_ACCEPT_HOOKS: "1",
+            RUST_LOG: process.env.RUST_LOG ?? "error"
+          },
           windowsHide: true
         }
       );
@@ -757,7 +866,7 @@ export class LocalCodexRunner {
         timedOut = true;
         child.kill("SIGTERM");
         setTimeout(() => child.kill("SIGKILL"), 5000).unref();
-      }, config.localCodex.timeoutMs);
+      }, this.timeoutMs);
 
       child.stdout?.on("data", (chunk) => {
         stdout = appendLimited(stdout, chunk);
@@ -767,7 +876,11 @@ export class LocalCodexRunner {
         stderr = appendLimited(stderr, chunk);
         this.appendRunOutput(workItemId, "stderr", chunk.toString());
       });
-      child.stdin?.end(prompt);
+      if (this.provider === "local") {
+        child.stdin?.end(prompt);
+      } else {
+        child.stdin?.end();
+      }
 
       child.on("error", (error) => {
         if (settled) {

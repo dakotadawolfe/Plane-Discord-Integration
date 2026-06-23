@@ -16,6 +16,8 @@ import type {
   PublicConfig,
   RecentWorkItemVisit,
   RequestPriority,
+  SourceSyncAction,
+  SourceSyncStatus,
   TaskCompletionReason,
   TaskStatus,
   WorkComment,
@@ -146,6 +148,16 @@ export function updateAdminUser(
   return apiFetch(`/api/admin/users/${encodeURIComponent(discordUserId)}`, {
     method: "PATCH",
     body: JSON.stringify(input)
+  });
+}
+
+export function getSourceSyncStatus(): Promise<{ sync: SourceSyncStatus }> {
+  return apiFetch("/api/admin/source-sync");
+}
+
+export function startSourceSync(action: SourceSyncAction): Promise<{ sync: SourceSyncStatus }> {
+  return apiFetch(`/api/admin/source-sync/${encodeURIComponent(action)}`, {
+    method: "POST"
   });
 }
 
@@ -464,7 +476,7 @@ export function subscribeLocalCodexOutput(
     onError?: () => void;
   }
 ): () => void {
-  const source = new EventSource(`/api/work-items/${encodeURIComponent(workItemId)}/local-codex-output`, {
+  const source = new EventSource(`/api/work-items/${encodeURIComponent(workItemId)}/ai-output`, {
     withCredentials: true
   });
   const snapshotListener = (event: MessageEvent<string>) => {
@@ -494,5 +506,5 @@ export function subscribeLocalCodexOutput(
 }
 
 export function getLocalCodexOutputSnapshot(workItemId: string): Promise<LocalCodexRunSnapshot> {
-  return apiFetch(`/api/work-items/${encodeURIComponent(workItemId)}/local-codex-output/snapshot`);
+  return apiFetch(`/api/work-items/${encodeURIComponent(workItemId)}/ai-output/snapshot`);
 }

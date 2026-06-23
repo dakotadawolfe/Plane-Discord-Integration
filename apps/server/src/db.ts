@@ -120,6 +120,15 @@ export interface WorkItemLinkRecord {
   updatedAt: string;
 }
 
+export interface WorkItemMemoryRecord {
+  workItemId: string;
+  body: string;
+  updatedByDiscordUserId: string | null;
+  updatedByName: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface WorkCommentRecord {
   id: string;
   workItemId: string;
@@ -320,6 +329,15 @@ interface WorkItemLinkRow {
   note: string | null;
   created_by_discord_user_id: string;
   created_by_discord_username: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface WorkItemMemoryRow {
+  work_item_id: string;
+  body: string;
+  updated_by_discord_user_id: string | null;
+  updated_by_name: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -600,6 +618,16 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_work_item_links_target
     ON work_item_links(target_work_item_id, updated_at DESC);
+
+  CREATE TABLE IF NOT EXISTS work_item_memories (
+    work_item_id TEXT PRIMARY KEY,
+    body TEXT NOT NULL,
+    updated_by_discord_user_id TEXT,
+    updated_by_name TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE CASCADE
+  );
 
   CREATE TABLE IF NOT EXISTS work_comments (
     id TEXT PRIMARY KEY,
@@ -1055,6 +1083,17 @@ function mapWorkItemLink(row: WorkItemLinkRow): WorkItemLinkRecord {
     note: row.note ?? null,
     createdByDiscordUserId: row.created_by_discord_user_id,
     createdByDiscordUsername: row.created_by_discord_username,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapWorkItemMemory(row: WorkItemMemoryRow): WorkItemMemoryRecord {
+  return {
+    workItemId: row.work_item_id,
+    body: row.body,
+    updatedByDiscordUserId: row.updated_by_discord_user_id,
+    updatedByName: row.updated_by_name,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -1626,6 +1665,55 @@ export function deleteWorkItemLink(id: string): WorkItemLinkRecord | null {
   return existing;
 }
 
+export function getWorkItemMemory(workItemId: string): WorkItemMemoryRecord | null {
+  const row = db.prepare("SELECT * FROM work_item_memories WHERE work_item_id = ?").get(workItemId) as WorkItemMemoryRow | undefined;
+  return row ? mapWorkItemMemory(row) : null;
+}
+
+export function upsertWorkItemMemory(input: {
+  workItemId: string;
+  body: string;
+  updatedByDiscordUserId: string | null;
+  updatedByName: string | null;
+}): WorkItemMemoryRecord {
+  const existing = getWorkItemMemory(input.workItemId);
+  const now = nowIso();
+  const record: WorkItemMemoryRecord = {
+    workItemId: input.workItemId,
+    body: input.body.trim(),
+    updatedByDiscordUserId: input.updatedByDiscordUserId,
+    updatedByName: input.updatedByName,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now
+  };
+
+  db.prepare(`
+    INSERT INTO work_item_memories (
+      work_item_id,
+      body,
+      updated_by_discord_user_id,
+      updated_by_name,
+      created_at,
+      updated_at
+    )
+    VALUES (
+      @workItemId,
+      @body,
+      @updatedByDiscordUserId,
+      @updatedByName,
+      @createdAt,
+      @updatedAt
+    )
+    ON CONFLICT(work_item_id) DO UPDATE SET
+      body = excluded.body,
+      updated_by_discord_user_id = excluded.updated_by_discord_user_id,
+      updated_by_name = excluded.updated_by_name,
+      updated_at = excluded.updated_at
+  `).run(record);
+
+  return getWorkItemMemory(input.workItemId) ?? record;
+}
+
 export function recordWorkItemVisit(discordUserId: string, workItemId: string): void {
   const visitedAt = nowIso();
 
@@ -1923,6 +2011,7 @@ export function deleteWorkItemTree(id: string): { deletedIds: string[] } {
       ...deletedIds
     );
     db.prepare(`DELETE FROM work_item_follows WHERE work_item_id IN (${placeholders})`).run(...deletedIds);
+    db.prepare(`DELETE FROM work_item_memories WHERE work_item_id IN (${placeholders})`).run(...deletedIds);
     db.prepare(`DELETE FROM work_comments WHERE work_item_id IN (${placeholders})`).run(...deletedIds);
     db.prepare(`DELETE FROM ai_artifacts WHERE work_item_id IN (${placeholders})`).run(...deletedIds);
     db.prepare(`DELETE FROM decisions WHERE work_item_id IN (${placeholders})`).run(...deletedIds);

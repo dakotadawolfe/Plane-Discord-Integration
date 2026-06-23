@@ -42,6 +42,11 @@ const optionalAiProvider = z.preprocess(
   z.enum(["hermes", "demo", "disabled"]).optional()
 );
 
+const optionalAiExecutionProvider = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z.enum(["local", "hermes", "disabled"]).optional()
+);
+
 const optionalString = z.preprocess(
   (value) => (value === "" ? undefined : value),
   z.string().optional()
@@ -90,6 +95,7 @@ const envSchema = z
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
     DEMO_MODE: optionalBooleanString,
     PORT: z.coerce.number().int().positive().default(3000),
+    HOST: optionalString,
     APP_BASE_URL: optionalUrl,
     COOKIE_SECURE: optionalBooleanString,
     COOKIE_SAMESITE: optionalCookieSameSite,
@@ -106,12 +112,25 @@ const envSchema = z
     HERMES_API_BASE_URL: optionalString,
     HERMES_API_KEY: optionalString,
     HERMES_MODEL: optionalString,
+    HERMES_TASK_PROVIDER: optionalString,
+    HERMES_TASK_MODEL: optionalString,
+    AI_EXECUTION_PROVIDER: optionalAiExecutionProvider,
+    AI_EXECUTION_COMMAND: optionalString,
+    AI_EXECUTION_WORKSPACE_DIR: optionalString,
+    AI_EXECUTION_RUN_DIR: optionalString,
+    AI_EXECUTION_TIMEOUT_SECONDS: optionalPositiveInteger,
+    AI_EXECUTION_MAX_CONCURRENCY: optionalPositiveInteger,
+    AI_EXECUTION_REQUIRE_ADMIN: optionalBooleanString,
     LOCAL_CODEX_ENABLED: optionalBooleanString,
     LOCAL_CODEX_COMMAND: optionalString,
     LOCAL_CODEX_WORKSPACE_DIR: optionalString,
     LOCAL_CODEX_TIMEOUT_SECONDS: optionalPositiveInteger,
     LOCAL_CODEX_MAX_CONCURRENCY: optionalPositiveInteger,
     LOCAL_CODEX_REQUIRE_ADMIN: optionalBooleanString,
+    SOURCE_SYNC_ENABLED: optionalBooleanString,
+    SOURCE_SYNC_REPO_DIR: optionalString,
+    SOURCE_SYNC_REMOTE: optionalString,
+    SOURCE_SYNC_BRANCH: optionalString,
     REQUEST_BODY_LIMIT: optionalRequestBodyLimit,
     PLANE_BASE_URL: optionalString,
     PLANE_API_KEY: optionalString,
@@ -214,12 +233,28 @@ function defaultLocalCodexCommand(): string {
 const isProduction = env.NODE_ENV === "production";
 const demoMode = env.DEMO_MODE === "true";
 const localCodexCommand = env.LOCAL_CODEX_COMMAND ?? defaultLocalCodexCommand();
+const aiExecutionProvider =
+  env.AI_EXECUTION_PROVIDER ??
+  (env.LOCAL_CODEX_ENABLED === "false" ? "disabled" : "local");
+const aiExecutionWorkspaceDir = resolve(repoRoot, env.AI_EXECUTION_WORKSPACE_DIR ?? env.LOCAL_CODEX_WORKSPACE_DIR ?? ".");
+const aiExecutionRunDir = resolve(repoRoot, env.AI_EXECUTION_RUN_DIR ?? "data/ai-runs");
+const aiExecutionCommand =
+  env.AI_EXECUTION_COMMAND ?? (aiExecutionProvider === "hermes" ? "hermes" : localCodexCommand);
+const aiExecutionTimeoutSeconds = env.AI_EXECUTION_TIMEOUT_SECONDS ?? env.LOCAL_CODEX_TIMEOUT_SECONDS ?? 1200;
+const aiExecutionMaxConcurrency = env.AI_EXECUTION_MAX_CONCURRENCY ?? env.LOCAL_CODEX_MAX_CONCURRENCY ?? 5;
+const aiExecutionRequireAdmin = env.AI_EXECUTION_REQUIRE_ADMIN
+  ? env.AI_EXECUTION_REQUIRE_ADMIN === "true"
+  : env.LOCAL_CODEX_REQUIRE_ADMIN
+    ? env.LOCAL_CODEX_REQUIRE_ADMIN === "true"
+    : true;
 
 export const config = {
+  repoRoot,
   nodeEnv: env.NODE_ENV,
   demoMode,
   isProduction,
   port: env.PORT,
+  host: env.HOST,
   appBaseUrl: env.APP_BASE_URL,
   cookies: {
     secure: env.COOKIE_SECURE ? env.COOKIE_SECURE === "true" : isProduction,
@@ -242,6 +277,17 @@ export const config = {
     hermesApiKey: env.HERMES_API_KEY,
     hermesModel: env.HERMES_MODEL ?? "hermes-agent"
   },
+  aiExecution: {
+    provider: aiExecutionProvider,
+    command: aiExecutionCommand,
+    workspaceDir: aiExecutionWorkspaceDir,
+    runDir: aiExecutionRunDir,
+    timeoutMs: aiExecutionTimeoutSeconds * 1000,
+    maxConcurrency: Math.min(aiExecutionMaxConcurrency, 5),
+    requireAdmin: aiExecutionRequireAdmin,
+    hermesTaskProvider: env.HERMES_TASK_PROVIDER,
+    hermesTaskModel: env.HERMES_TASK_MODEL ?? env.HERMES_MODEL
+  },
   localCodex: {
     enabled: env.LOCAL_CODEX_ENABLED ? env.LOCAL_CODEX_ENABLED === "true" : true,
     command: localCodexCommand,
@@ -249,6 +295,12 @@ export const config = {
     timeoutMs: (env.LOCAL_CODEX_TIMEOUT_SECONDS ?? 1200) * 1000,
     maxConcurrency: Math.min(env.LOCAL_CODEX_MAX_CONCURRENCY ?? 5, 5),
     requireAdmin: env.LOCAL_CODEX_REQUIRE_ADMIN ? env.LOCAL_CODEX_REQUIRE_ADMIN === "true" : true
+  },
+  sourceSync: {
+    enabled: env.SOURCE_SYNC_ENABLED ? env.SOURCE_SYNC_ENABLED === "true" : true,
+    repoDir: resolve(repoRoot, env.SOURCE_SYNC_REPO_DIR ?? "."),
+    remote: env.SOURCE_SYNC_REMOTE ?? "origin",
+    branch: env.SOURCE_SYNC_BRANCH ?? "main"
   },
   http: {
     requestBodyLimit: env.REQUEST_BODY_LIMIT ?? "50mb"

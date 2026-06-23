@@ -8,12 +8,18 @@ import { LocalCodexRunner } from "./local-codex-runner.js";
 import { runInactiveArchiveSweep } from "./maintenance.js";
 import { PlaneClient } from "./plane.js";
 import { createApp } from "./routes.js";
+import { DisabledAiTaskRunner, type AiTaskRunner } from "./task-runner.js";
 
 const discord = new DiscordService();
 await discord.start();
 const ai = createAiClient();
 const aiWorker = new AiWorker(ai, discord);
-const localCodexRunner = new LocalCodexRunner();
+const taskRunner: AiTaskRunner =
+  config.aiExecution.provider === "hermes"
+    ? new LocalCodexRunner("hermes")
+    : config.aiExecution.provider === "local"
+      ? new LocalCodexRunner("local")
+      : new DisabledAiTaskRunner();
 aiWorker.start();
 const eventHeartbeat = setInterval(heartbeatEventClients, 25000);
 runInactiveArchiveSweep();
@@ -24,14 +30,18 @@ const app = createApp({
   discord,
   aiWorker,
   ai,
-  localCodexRunner
+  taskRunner
 });
 
-const server = app.listen(config.port, () => {
+const server = config.host
+  ? app.listen(config.port, config.host, onListening)
+  : app.listen(config.port, onListening);
+
+function onListening() {
   console.log(
-    `Project Desk listening on port ${config.port} in ${config.demoMode ? "demo" : "Plane"} mode with ${config.ai.provider} AI.`
+    `Project Desk listening on ${config.host ?? "0.0.0.0"}:${config.port} in ${config.demoMode ? "demo" : "Plane"} mode with ${config.ai.provider} AI and ${taskRunner.label} execution.`
   );
-});
+}
 
 async function shutdown() {
   console.log("Shutting down Project Desk.");

@@ -74,6 +74,7 @@ import {
   getMe,
   getPublicConfig,
   getRecentWorkItemVisits,
+  getSourceSyncStatus,
   getWorkItem,
   listAdminUsers,
   listPeople,
@@ -86,6 +87,7 @@ import {
   promoteIdea,
   subscribeProjectDeskEvents,
   subscribeLocalCodexOutput,
+  startSourceSync,
   suggestWorkItemTitle,
   updateWorkItemAssignee,
   updateWorkItemCategory,
@@ -119,6 +121,8 @@ import type {
   PublicConfig,
   RecentWorkItemVisit,
   RequestPriority,
+  SourceSyncAction,
+  SourceSyncStatus,
   TaskCompletionReason,
   TaskStatus,
   UploadedAttachment,
@@ -665,7 +669,7 @@ function categoryLabel(value: IdeaCategory | null | undefined) {
 
 function personOptionLabel(person: KnownPerson) {
   if (isProjectDeskAiPerson(person)) {
-    return "Project Desk AI (local Codex)";
+    return "Project Desk AI";
   }
 
   return person.tagName ? `${person.displayName} (@${person.tagName})` : person.displayName;
@@ -1111,7 +1115,7 @@ function GlobalAnnotationTaskModal({
             <div className="task-ai-reasoning-panel">
               <div>
                 <strong>Project Desk AI</strong>
-                <span>Queues this task for the local Codex runner.</span>
+                <span>Queues this task for the configured AI task runner.</span>
               </div>
               <label className="field">
                 <span>Reasoning</span>
@@ -1460,6 +1464,9 @@ function AdminSettingsModal({
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<SourceSyncStatus | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncAction, setSyncAction] = useState<SourceSyncAction | null>(null);
   const selectedUser = users.find((profile) => profile.discordUserId === selectedId) ?? null;
 
   useEffect(() => {
@@ -1477,6 +1484,37 @@ function AdminSettingsModal({
       .catch((err) => setError(err instanceof ApiError ? err.message : "Could not load users."))
       .finally(() => setLoading(false));
   }, [open]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const refreshSync = async () => {
+      try {
+        const payload = await getSourceSyncStatus();
+
+        if (!cancelled) {
+          setSyncStatus(payload.sync);
+          setSyncError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setSyncError(err instanceof ApiError ? err.message : "Could not load source sync status.");
+        }
+      }
+    };
+
+    void refreshSync();
+    const timer = window.setInterval(() => void refreshSync(), syncStatus?.running ? 2000 : 6000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [open, syncStatus?.running]);
 
   useEffect(() => {
     if (!selectedUser) {
@@ -1515,6 +1553,20 @@ function AdminSettingsModal({
       setError(err instanceof ApiError ? err.message : "Could not save user.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function runSourceSync(action: SourceSyncAction) {
+    setSyncAction(action);
+    setSyncError(null);
+
+    try {
+      const payload = await startSourceSync(action);
+      setSyncStatus(payload.sync);
+    } catch (err) {
+      setSyncError(err instanceof ApiError ? err.message : "Could not start source sync.");
+    } finally {
+      setSyncAction(null);
     }
   }
 
@@ -1568,7 +1620,8 @@ function AdminSettingsModal({
             </div>
           </aside>
           {selectedUser ? (
-            <form className="settings-form admin-user-form" onSubmit={(event) => void saveSelected(event)}>
+            <div className="admin-settings-content">
+              <form className="settings-form admin-user-form" onSubmit={(event) => void saveSelected(event)}>
               <div className="settings-preview">
                 {avatarUrl ? <img src={avatarUrl} alt="" className="avatar large" /> : <div className="avatar large fallback">{displayName.slice(0, 1).toUpperCase()}</div>}
                 <div>
@@ -1608,13 +1661,75 @@ function AdminSettingsModal({
                   Save user
                 </button>
               </div>
-            </form>
+              </form>
+              <SourceSyncPanel
+                status={syncStatus}
+                error={syncError}
+                pendingAction={syncAction}
+                onRun={(action) => void runSourceSync(action)}
+              />
+            </div>
           ) : (
             <p className="muted">No user selected.</p>
           )}
         </div>
       </section>
     </div>
+  );
+}
+
+function SourceSyncPanel({
+  status,
+  error,
+  pendingAction,
+  onRun
+}: {
+  status: SourceSyncStatus | null;
+  error: string | null;
+  pendingAction: SourceSyncAction | null;
+  onRun: (action: SourceSyncAction) => void;
+}) {
+  const running = Boolean(status?.running);
+  const disabled = running || Boolean(pendingAction) || status?.enabled === false;
+  const statusLabel = status
+    ? status.running
+      ? `Running ${status.action ?? "sync"}`
+      : status.state === "idle"
+        ? "Idle"
+        : humanize(status.state)
+    : "Checking";
+
+  return (
+    <section className="settings-form source-sync-panel" aria-label="Source sync">
+      <div className="source-sync-header">
+        <div>
+          <h3>Source sync</h3>
+          <p className="muted">Syncs only Project Desk app code and docs. Project data, uploads, DB files, and env files stay local.</p>
+        </div>
+        <span className={`codex-status ${status?.state ?? "idle"}`}>{statusLabel}</span>
+      </div>
+      {error ? <div className="error-banner">{error}</div> : null}
+      {status?.enabled === false ? <p className="muted">Source sync is disabled on this server.</p> : null}
+      <div className="source-sync-actions">
+        <button className="secondary-button" type="button" disabled={disabled} onClick={() => onRun("pull")}>
+          <Download size={16} /> Sync from GitHub
+        </button>
+        <button className="secondary-button" type="button" disabled={disabled} onClick={() => onRun("push")}>
+          <ArrowRight size={16} /> Sync app to GitHub
+        </button>
+        <button className="secondary-button" type="button" disabled={disabled} onClick={() => onRun("restart")}>
+          <RefreshCw size={16} /> Restart app
+        </button>
+      </div>
+      {status?.message ? <p className={`source-sync-message ${status.state}`}>{status.message}</p> : null}
+      {status?.output?.length ? (
+        <pre className="source-sync-output" aria-live="polite">
+          {status.output.join("\n")}
+        </pre>
+      ) : (
+        <p className="muted">No sync output yet.</p>
+      )}
+    </section>
   );
 }
 
@@ -3550,7 +3665,7 @@ function RecentProjectActivity({
                           {codexActive || codexRestartRequired ? (
                             <span className={`codex-inline-status compact ${codexStatus}`}>
                               {codexActive ? <span className="codex-live-dot" aria-hidden="true" /> : null}
-                              {codexRestartRequired ? "Restart npm" : "Codex working"}
+                              {codexRestartRequired ? "Restart npm" : "AI working"}
                             </span>
                           ) : null}
                           <TaskStatusPill item={task.item} codexStatus={codexStatus} />
@@ -3944,7 +4059,7 @@ function TaskList({
                 {codexActive || codexRestartRequired ? (
                   <span className={`codex-inline-status compact ${codexStatus}`}>
                     {codexActive ? <span className="codex-live-dot" aria-hidden="true" /> : null}
-                    {codexRestartRequired ? "Restart npm" : "Codex working"}
+                    {codexRestartRequired ? "Restart npm" : "AI working"}
                   </span>
                 ) : null}
               </span>
@@ -4763,7 +4878,7 @@ function WorkItemDetailPage({
       await updateWorkItemAssignee(id, projectDeskAiUserId, reasoning);
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not update Codex reasoning.");
+      setError(err instanceof ApiError ? err.message : "Could not update AI reasoning.");
     } finally {
       setSaving(false);
     }
@@ -5017,7 +5132,7 @@ function WorkItemDetailPage({
               <div className="codex-title-actions">
                 <button className="secondary-button compact-button" type="button" onClick={() => setCodexOutputOpen((open) => !open)}>
                   <Terminal size={16} />
-                  {codexOutputOpen ? "Hide Codex" : "Codex output"}
+                  {codexOutputOpen ? "Hide AI" : "AI output"}
                 </button>
                 <CodexRunBadge snapshot={codexHeaderSnapshot} error={codexHeaderError} />
               </div>
@@ -5027,7 +5142,7 @@ function WorkItemDetailPage({
             {codexHeaderActiveStatus ? (
               <span className={`codex-inline-status compact ${codexHeaderActiveStatus}`}>
                 <span className="codex-live-dot" aria-hidden="true" />
-                Codex actively working
+                AI actively working
               </span>
             ) : null}
             {codexHeaderRestartRequiredStatus ? (
@@ -5431,11 +5546,11 @@ function AiAssignmentModal({
         <div className="modal-header">
           <div>
             <p className="eyebrow">Project Desk AI</p>
-            <h2 id="ai-assignment-title">Assign local Codex</h2>
+            <h2 id="ai-assignment-title">Assign Project Desk AI</h2>
           </div>
         </div>
         <div className="stack">
-          <p className="muted">This queues the task for the local Codex runner on this PC.</p>
+          <p className="muted">This queues the task for the configured AI task runner.</p>
           <label className="field">
             <span>Reasoning</span>
             <select value={reasoning} disabled={saving} onChange={(event) => onReasoningChange(event.target.value as CodexReasoningEffort)}>
@@ -5549,7 +5664,7 @@ function TaskCreateModal({
             <div className="task-ai-reasoning-panel">
               <div>
                 <strong>Project Desk AI</strong>
-                <span>Queues this task for the local Codex runner.</span>
+                <span>Queues this task for the configured AI task runner.</span>
               </div>
               <label className="field">
                 <span>Reasoning</span>
@@ -6076,7 +6191,7 @@ function localCodexStatusLabel(status: LocalCodexRunStatus) {
 
 function CodexRunBadge({ snapshot, error }: { snapshot: LocalCodexRunSnapshot | null; error: boolean }) {
   if (error) {
-    return <span className="codex-inline-status failed">Codex unknown</span>;
+    return <span className="codex-inline-status failed">AI unknown</span>;
   }
 
   const status = snapshot?.status ?? "idle";
@@ -6085,7 +6200,7 @@ function CodexRunBadge({ snapshot, error }: { snapshot: LocalCodexRunSnapshot | 
   return (
     <span className={`codex-inline-status ${status}`}>
       {status === "queued" || status === "running" ? <span className="codex-live-dot" aria-hidden="true" /> : null}
-      Codex {label.toLowerCase()}
+      AI {label.toLowerCase()}
     </span>
   );
 }
@@ -6132,21 +6247,21 @@ function visibleCodexOutputText(entry: LocalCodexOutputEntry): string | null {
       continue;
     }
 
-    const codexLine = line.match(/^(?:codex|assistant|project desk ai)\b[:\s-]*(.*)$/i);
+    const codexLine = line.match(/^(?:codex|hermes|assistant|project desk ai|ai)\b[:\s-]*(.*)$/i);
 
     if (codexLine) {
       const message = (codexLine[1] ?? "").trim();
       inCodexBlock = true;
 
       if (message) {
-        visible.push(`Codex: ${message}`);
+        visible.push(`AI: ${message}`);
       }
 
       continue;
     }
 
     if (inCodexBlock) {
-      visible.push(`Codex: ${line}`);
+      visible.push(`AI: ${line}`);
     }
   }
 
@@ -6156,7 +6271,7 @@ function visibleCodexOutputText(entry: LocalCodexOutputEntry): string | null {
 function stripVisibleCodexPrefix(value: string): string {
   return value
     .split("\n")
-    .map((line) => line.replace(/^Codex:\s*/i, ""))
+    .map((line) => line.replace(/^(?:Codex|AI):\s*/i, ""))
     .join("\n")
     .trim();
 }
@@ -6260,7 +6375,7 @@ function LocalCodexOutputPanel({ taskId }: { taskId: string }) {
     <div className="codex-output-panel">
       <div className="codex-output-header">
         <div>
-          <strong>Codex Updates</strong>
+          <strong>AI Updates</strong>
           <span>{snapshot?.startedAt ? `Started ${formatDate(snapshot.startedAt)}` : "Waiting for a local run"}</span>
         </div>
         <span className={`codex-status ${status}`}>{localCodexStatusLabel(status)}</span>
@@ -6268,11 +6383,11 @@ function LocalCodexOutputPanel({ taskId }: { taskId: string }) {
       {streamError ? <p className="codex-output-error">Live stream disconnected. Reopen the panel if it does not reconnect.</p> : null}
       <div className="codex-output-stream" ref={streamRef} role="log" aria-live="polite" onScroll={handleCodexStreamScroll}>
         {visibleOutput.length === 0 ? (
-          <p className="muted">{status === "idle" ? "No local Codex output for this task yet." : "Waiting for Codex output..."}</p>
+          <p className="muted">{status === "idle" ? "No AI output for this task yet." : "Waiting for AI output..."}</p>
         ) : (
           visibleOutput.map((entry) => (
             <div className={`codex-output-entry ${entry.stream}`} key={entry.id}>
-              <span>Codex</span>
+              <span>AI</span>
               <p>{entry.text}</p>
             </div>
           ))

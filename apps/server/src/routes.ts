@@ -28,6 +28,7 @@ import {
   getAttachmentById,
   countUnreadInboxNotifications,
   getUserProfile,
+  getWorkItemMemory,
   getWorkItemLinkById,
   getWorkItemById,
   getWorkCommentById,
@@ -76,6 +77,7 @@ import {
   updateWorkItemStage,
   updateWorkItemTaskStatus,
   updateWorkItemTitle,
+  upsertWorkItemMemory,
   unfollowWorkItem,
   upsertUserProfile,
   updateCommentPlaneId,
@@ -111,9 +113,10 @@ import { DiscordService } from "./discord.js";
 import { addEventClient, emitProjectDeskEvent } from "./events.js";
 import { stripHtml } from "./html.js";
 import { captureRawBody, handleDiscordInteraction } from "./interactions.js";
-import type { LocalCodexRunner } from "./local-codex-runner.js";
 import { runInactiveArchiveSweep } from "./maintenance.js";
 import { PlaneApiError, type PlaneComment, type PlaneLikeClient, type PlaneWorkItem } from "./plane.js";
+import { getSourceSyncStatus, startSourceSync, type SourceSyncAction } from "./source-sync.js";
+import type { AiTaskRunner } from "./task-runner.js";
 
 interface AppSession {
   user?: SessionUser;
@@ -127,7 +130,7 @@ interface CreateAppServices {
   discord: DiscordService;
   aiWorker: AiWorker;
   ai: AiClient;
-  localCodexRunner: LocalCodexRunner;
+  taskRunner: AiTaskRunner;
 }
 
 const createRequestSchema = z.object({
@@ -413,6 +416,10 @@ const updateWorkItemTitleSchema = z.object({
   title: z.string().trim().min(3).max(160)
 });
 
+const updateWorkItemMemorySchema = z.object({
+  body: z.string().trim().max(12000)
+});
+
 const updateTaskStatusSchema = z.object({
   taskStatus: z.enum(taskStatuses),
   completionReason: z.enum(taskCompletionReasons).optional().nullable()
@@ -466,6 +473,8 @@ const enqueueAiJobSchema = z.object({
   type: z.enum(aiJobTypes),
   reason: z.string().trim().max(500).optional()
 });
+
+const sourceSyncActions = ["pull", "push", "restart"] as const satisfies readonly SourceSyncAction[];
 
 function getSession(req: Request): AppSession {
   if (!req.session) {
@@ -1106,13 +1115,23 @@ function projectDeskAiPerson(): KnownPersonRecord {
   };
 }
 
-function withProjectDeskAiPerson(people: KnownPersonRecord[]): KnownPersonRecord[] {
+function withProjectDeskAiPerson(people: KnownPersonRecord[], taskRunner: AiTaskRunner): KnownPersonRecord[] {
   const filteredPeople = people.filter((person) => !isProjectDeskAiUserId(person.discordUserId));
-  return config.localCodex.enabled ? [projectDeskAiPerson(), ...filteredPeople] : filteredPeople;
+  return taskRunner.enabled ? [projectDeskAiPerson(), ...filteredPeople] : filteredPeople;
 }
 
-function canAssignLocalCodex(user: SessionUser): boolean {
-  return config.localCodex.enabled && (!config.localCodex.requireAdmin || user.isAdmin);
+function canAssignProjectDeskAi(user: SessionUser, taskRunner: AiTaskRunner): boolean {
+  return taskRunner.enabled && (!taskRunner.requireAdmin || user.isAdmin);
+}
+
+function aiTaskRunnerUnavailableMessage(user: SessionUser, taskRunner: AiTaskRunner): string {
+  if (!taskRunner.enabled) {
+    return `${projectDeskAiDisplayName} task runner is disabled.`;
+  }
+
+  return taskRunner.requireAdmin && !user.isAdmin
+    ? `Administrator role required to run ${taskRunner.label}.`
+    : `${projectDeskAiDisplayName} cannot be assigned right now.`;
 }
 
 function toKnownPersonApi(person: KnownPersonRecord) {
@@ -1827,7 +1846,7 @@ async function attachWorkItems(records: RequestRecord[], plane: PlaneLikeClient)
   );
 }
 
-export function createApp({ plane, discord, aiWorker, ai, localCodexRunner }: CreateAppServices) {
+export function createApp({ plane, discord, aiWorker, ai, taskRunner }: CreateAppServices) {
   const app = express();
   const __dirname = dirname(fileURLToPath(import.meta.url));
   const webDistDir = process.env.WEB_DIST_DIR ?? resolve(__dirname, "../../web/dist");
@@ -2081,7 +2100,7 @@ export function createApp({ plane, discord, aiWorker, ai, localCodexRunner }: Cr
   });
 
   api.get("/people", requireAuth, async (_req, res) => {
-    res.json({ people: withProjectDeskAiPerson(await hydratePeopleProfiles(discord)) });
+    res.json({ people: withProjectDeskAiPerson(await hydratePeopleProfiles(discord), taskRunner) });
   });
 
   api.patch("/profile", requireAuth, (req, res) => {
@@ -2167,6 +2186,23 @@ export function createApp({ plane, discord, aiWorker, ai, localCodexRunner }: Cr
     res.json({ user: toUserProfileApi(updated) });
   });
 
+  api.get("/admin/source-sync", requireAuth, requireAdmin, (_req, res) => {
+    res.json({ sync: getSourceSyncStatus() });
+  });
+
+  api.post("/admin/source-sync/:action", requireAuth, requireAdmin, (req, res) => {
+    const user = getSession(req).user!;
+    const action = routeParam(req.params.action);
+
+    if (!action || !sourceSyncActions.includes(action as SourceSyncAction)) {
+      res.status(400).json({ error: "Unsupported source sync action." });
+      return;
+    }
+
+    const sync = startSourceSync(action as SourceSyncAction, user.displayName);
+    res.status(sync.running ? 202 : sync.state === "failed" ? 409 : 200).json({ sync });
+  });
+
   api.post("/work-items", requireAuth, async (req, res) => {
     const user = getSession(req).user!;
     const input = createWorkItemSchema.parse(req.body);
@@ -2193,18 +2229,16 @@ export function createApp({ plane, discord, aiWorker, ai, localCodexRunner }: Cr
       return;
     }
 
-    const assignToLocalCodex = isProjectDeskAiUserId(input.ownerDiscordUserId);
+    const assignToProjectDeskAi = isProjectDeskAiUserId(input.ownerDiscordUserId);
 
-    if (assignToLocalCodex && input.kind !== "task") {
+    if (assignToProjectDeskAi && input.kind !== "task") {
       res.status(400).json({ error: "Only tasks can be assigned to Project Desk AI." });
       return;
     }
 
-    if (assignToLocalCodex && !canAssignLocalCodex(user)) {
+    if (assignToProjectDeskAi && !canAssignProjectDeskAi(user, taskRunner)) {
       res.status(403).json({
-        error: config.localCodex.enabled
-          ? "Administrator role required to run local Codex."
-          : "Local Codex runner is disabled."
+        error: aiTaskRunnerUnavailableMessage(user, taskRunner)
       });
       return;
     }
@@ -2222,7 +2256,7 @@ export function createApp({ plane, discord, aiWorker, ai, localCodexRunner }: Cr
       details: input.details,
       category: input.kind === "task" ? parent?.category ?? null : input.category ?? "other",
       priority: input.priority,
-      codexReasoning: input.kind === "task" && assignToLocalCodex ? input.codexReasoning : null,
+      codexReasoning: input.kind === "task" && assignToProjectDeskAi ? input.codexReasoning : null,
       stage: input.kind === "task" ? "active" : "review",
       taskStatus: input.kind === "task" ? "todo" : null,
       taskCompletionReason: null,
@@ -2321,7 +2355,7 @@ export function createApp({ plane, discord, aiWorker, ai, localCodexRunner }: Cr
     }
 
     if (item.kind === "task" && isProjectDeskAiUserId(item.ownerDiscordUserId)) {
-      localCodexRunner.enqueueTask(item.id, user.displayName, `Task was created assigned to ${projectDeskAiDisplayName}.`);
+      taskRunner.enqueueTask(item.id, user.displayName, `Task was created assigned to ${projectDeskAiDisplayName}.`);
     } else if (item.kind === "task" && item.ownerDiscordUserId && item.ownerDiscordUserId !== user.id) {
       await sendRecordedDm(discord, {
         workItemId: item.id,
@@ -2376,6 +2410,7 @@ export function createApp({ plane, discord, aiWorker, ai, localCodexRunner }: Cr
       },
       parentItem: parentRecord && canAccessWorkItem(user, parentRecord) ? toWorkItemSummary(parentRecord, user.id) : null,
       comments: comments.map(toWorkCommentApi),
+      memory: getWorkItemMemory(record.id),
       decisions: listDecisions(record.id),
       activity: listActivityEvents(record.id),
       links: listWorkItemLinksForItem(record.id)
@@ -2383,6 +2418,50 @@ export function createApp({ plane, discord, aiWorker, ai, localCodexRunner }: Cr
         .filter((link): link is NonNullable<typeof link> => Boolean(link)),
       childItems: listWorkItemsByParent(record.id).map((child) => toWorkItemSummary(child, user.id))
     });
+  });
+
+  api.get("/work-items/:id/memory", requireAuth, (req, res) => {
+    const user = getSession(req).user!;
+    const workItemId = routeParam(req.params.id);
+    const record = workItemId ? getWorkItemById(workItemId) : null;
+
+    if (!record || !canAccessWorkItem(user, record)) {
+      res.status(404).json({ error: "Work item not found." });
+      return;
+    }
+
+    res.json({ memory: getWorkItemMemory(record.id) });
+  });
+
+  api.patch("/work-items/:id/memory", requireAuth, requireAdmin, (req, res) => {
+    const user = getSession(req).user!;
+    const workItemId = routeParam(req.params.id);
+    const record = workItemId ? getWorkItemById(workItemId) : null;
+
+    if (!record || !canAccessWorkItem(user, record)) {
+      res.status(404).json({ error: "Work item not found." });
+      return;
+    }
+
+    const input = updateWorkItemMemorySchema.parse(req.body);
+    const memory = upsertWorkItemMemory({
+      workItemId: record.id,
+      body: input.body,
+      updatedByDiscordUserId: user.id,
+      updatedByName: user.displayName
+    });
+
+    insertActivityEvent({
+      id: crypto.randomUUID(),
+      workItemId: record.id,
+      type: "memory_updated",
+      actorName: user.displayName,
+      body: "Updated scoped memory.",
+      metadataJson: null
+    });
+    emitProjectDeskEvent({ type: "work_item_changed", workItemId: record.id });
+
+    res.json({ memory });
   });
 
   api.post("/work-items/:id/links", requireAuth, (req, res) => {
@@ -2462,7 +2541,7 @@ export function createApp({ plane, discord, aiWorker, ai, localCodexRunner }: Cr
     });
   });
 
-  api.get("/work-items/:id/local-codex-output", requireAuth, (req, res) => {
+  function streamTaskRunnerOutput(req: Request, res: Response) {
     const user = getSession(req).user!;
     const workItemId = routeParam(req.params.id);
     const record = workItemId ? getWorkItemById(workItemId) : null;
@@ -2473,7 +2552,7 @@ export function createApp({ plane, discord, aiWorker, ai, localCodexRunner }: Cr
     }
 
     if (record.kind !== "task") {
-      res.status(400).json({ error: "Local Codex output is only available for tasks." });
+      res.status(400).json({ error: "AI output is only available for tasks." });
       return;
     }
 
@@ -2486,18 +2565,18 @@ export function createApp({ plane, discord, aiWorker, ai, localCodexRunner }: Cr
       res.write(`event: ${eventName}\n`);
       res.write(`data: ${JSON.stringify(payload)}\n\n`);
     };
-    const cleanupOutput = localCodexRunner.subscribeOutput(record.id, send);
+    const cleanupOutput = taskRunner.subscribeOutput(record.id, send);
     const heartbeat = setInterval(() => {
-      res.write(`: codex-output heartbeat ${new Date().toISOString()}\n\n`);
+      res.write(`: ai-output heartbeat ${new Date().toISOString()}\n\n`);
     }, 25000);
 
     req.on("close", () => {
       clearInterval(heartbeat);
       cleanupOutput();
     });
-  });
+  }
 
-  api.get("/work-items/:id/local-codex-output/snapshot", requireAuth, (req, res) => {
+  function taskRunnerOutputSnapshot(req: Request, res: Response) {
     const user = getSession(req).user!;
     const workItemId = routeParam(req.params.id);
     const record = workItemId ? getWorkItemById(workItemId) : null;
@@ -2508,13 +2587,18 @@ export function createApp({ plane, discord, aiWorker, ai, localCodexRunner }: Cr
     }
 
     if (record.kind !== "task") {
-      res.status(400).json({ error: "Local Codex output is only available for tasks." });
+      res.status(400).json({ error: "AI output is only available for tasks." });
       return;
     }
 
     res.setHeader("Cache-Control", "no-cache");
-    res.json(localCodexRunner.getSnapshot(record.id));
-  });
+    res.json(taskRunner.getSnapshot(record.id));
+  }
+
+  api.get("/work-items/:id/ai-output", requireAuth, streamTaskRunnerOutput);
+  api.get("/work-items/:id/ai-output/snapshot", requireAuth, taskRunnerOutputSnapshot);
+  api.get("/work-items/:id/local-codex-output", requireAuth, streamTaskRunnerOutput);
+  api.get("/work-items/:id/local-codex-output/snapshot", requireAuth, taskRunnerOutputSnapshot);
 
   api.post("/work-items/:id/comments", requireAuth, async (req, res) => {
     const user = getSession(req).user!;
@@ -2661,8 +2745,8 @@ export function createApp({ plane, discord, aiWorker, ai, localCodexRunner }: Cr
 
     if (mentionsAi(input.body) && !isArchivedStage(record.stage)) {
       if (record.kind === "task") {
-        if (canAssignLocalCodex(user)) {
-          const queued = localCodexRunner.enqueueTask(record.id, user.displayName, `@AI was mentioned by ${user.displayName}.`);
+        if (canAssignProjectDeskAi(user, taskRunner)) {
+          const queued = taskRunner.enqueueTask(record.id, user.displayName, `@AI was mentioned by ${user.displayName}.`);
 
           if (!queued.queued && queued.reason) {
             insertSystemWorkComment(record.id, queued.reason);
@@ -2670,9 +2754,7 @@ export function createApp({ plane, discord, aiWorker, ai, localCodexRunner }: Cr
         } else {
           insertSystemWorkComment(
             record.id,
-            config.localCodex.enabled
-              ? `${projectDeskAiDisplayName} was mentioned, but local Codex runs require an Administrator.`
-              : `${projectDeskAiDisplayName} was mentioned, but the local Codex runner is disabled.`
+            `${projectDeskAiDisplayName} was mentioned, but ${aiTaskRunnerUnavailableMessage(user, taskRunner)}`
           );
         }
       } else {
@@ -2948,24 +3030,22 @@ export function createApp({ plane, discord, aiWorker, ai, localCodexRunner }: Cr
     }
 
     const input = updateAssigneeSchema.parse(req.body);
-    const assignToLocalCodex = isProjectDeskAiUserId(input.discordUserId);
+    const assignToProjectDeskAi = isProjectDeskAiUserId(input.discordUserId);
 
-    if (assignToLocalCodex && record.kind !== "task") {
+    if (assignToProjectDeskAi && record.kind !== "task") {
       res.status(400).json({ error: "Only tasks can be assigned to Project Desk AI." });
       return;
     }
 
-    if (assignToLocalCodex && !canAssignLocalCodex(user)) {
+    if (assignToProjectDeskAi && !canAssignProjectDeskAi(user, taskRunner)) {
       res.status(403).json({
-        error: config.localCodex.enabled
-          ? "Administrator role required to run local Codex."
-          : "Local Codex runner is disabled."
+        error: aiTaskRunnerUnavailableMessage(user, taskRunner)
       });
       return;
     }
 
     const assignee = input.discordUserId ? await resolveKnownPerson(discord, input.discordUserId) : null;
-    const nextCodexReasoning = assignToLocalCodex ? input.codexReasoning : null;
+    const nextCodexReasoning = assignToProjectDeskAi ? input.codexReasoning : null;
     const updated = updateWorkItemOwner(record.id, {
       ownerDiscordUserId: assignee?.discordUserId ?? null,
       ownerDiscordUsername: assignee?.displayName ?? null,
@@ -3006,14 +3086,14 @@ export function createApp({ plane, discord, aiWorker, ai, localCodexRunner }: Cr
     if (isProjectDeskAiUserId(updated.ownerDiscordUserId) && record.codexReasoning !== updated.codexReasoning) {
       insertSystemWorkComment(
         updated.id,
-        `${markdownInline(user.displayName)} changed Codex reasoning from ${boldMarkdownValue(
+        `${markdownInline(user.displayName)} changed AI reasoning from ${boldMarkdownValue(
           humanizeCodexReasoning(record.codexReasoning)
         )} to ${boldMarkdownValue(humanizeCodexReasoning(updated.codexReasoning))}.`
       );
     }
 
-    if (assignToLocalCodex && record.ownerDiscordUserId !== updated.ownerDiscordUserId) {
-      localCodexRunner.enqueueTask(updated.id, user.displayName, `${user.displayName} assigned this task to ${projectDeskAiDisplayName}.`);
+    if (assignToProjectDeskAi && record.ownerDiscordUserId !== updated.ownerDiscordUserId) {
+      taskRunner.enqueueTask(updated.id, user.displayName, `${user.displayName} assigned this task to ${projectDeskAiDisplayName}.`);
     } else if (assignee && assignee.discordUserId !== user.id && assignee.discordUserId !== record.ownerDiscordUserId) {
       const inboxNotification = createInboxNotification({
         record: updated,

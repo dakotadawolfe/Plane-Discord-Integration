@@ -144,6 +144,15 @@ export interface WorkItemLink {
   updatedAt: string;
 }
 
+export interface WorkItemMemory {
+  workItemId: string;
+  body: string;
+  updatedByDiscordUserId: string | null;
+  updatedByName: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface RecentWorkItemVisit {
   item: WorkItemSummary;
   parentItem: WorkItemSummary | null;
@@ -297,13 +306,14 @@ export interface WorkItemDetailPayload {
   item: WorkItemDetail;
   parentItem: WorkItemSummary | null;
   comments: WorkComment[];
+  memory: WorkItemMemory | null;
   decisions: Decision[];
   activity: ActivityEvent[];
   links: WorkItemLink[];
   childItems: WorkItemSummary[];
 }
 
-export type LocalCodexRunStatus =
+export type AiTaskRunStatus =
   | "idle"
   | "queued"
   | "running"
@@ -313,18 +323,37 @@ export type LocalCodexRunStatus =
   | "timed_out"
   | "start_failed";
 
-export interface LocalCodexOutputEntry {
+export interface AiTaskOutputEntry {
   id: string;
   stream: "system" | "stdout" | "stderr";
   text: string;
   at: string;
 }
 
-export interface LocalCodexRunSnapshot {
+export interface AiTaskRunSnapshot {
   workItemId: string;
-  status: LocalCodexRunStatus;
+  status: AiTaskRunStatus;
   reason: string | null;
   startedAt: string | null;
   endedAt: string | null;
-  output: LocalCodexOutputEntry[];
+  output: AiTaskOutputEntry[];
+}
+
+export type LocalCodexRunStatus = AiTaskRunStatus;
+export type LocalCodexOutputEntry = AiTaskOutputEntry;
+export type LocalCodexRunSnapshot = AiTaskRunSnapshot;
+
+export type SourceSyncAction = "pull" | "push" | "restart";
+export type SourceSyncState = "idle" | "running" | "succeeded" | "failed";
+
+export interface SourceSyncStatus {
+  enabled: boolean;
+  running: boolean;
+  state: SourceSyncState;
+  action: SourceSyncAction | null;
+  actorName: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  message: string | null;
+  output: string[];
 }
