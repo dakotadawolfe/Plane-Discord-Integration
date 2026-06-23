@@ -810,8 +810,6 @@ export class LocalCodexRunner implements AiTaskRunner {
           "",
           "Keep your final answer concise and focused on what changed, verification, and blockers."
         ].join("\n"),
-        "--worktree",
-        this.workspaceDir,
         "--accept-hooks",
         "--yolo",
         "--quiet",
