@@ -79,7 +79,6 @@ export async function completeDiscordActivityLogin(input: {
 }
 
 async function restoreDiscordActivitySession(input: {
-  sdk: DiscordActivitySdkLike;
   establishSession: (accessToken: string) => Promise<void>;
   tokenStore?: DiscordActivityTokenStore;
   fallbackLogin?: () => void;
@@ -92,15 +91,9 @@ async function restoreDiscordActivitySession(input: {
   }
 
   try {
-    await input.sdk.commands.authenticate({ access_token: accessToken });
-  } catch (error) {
-    input.tokenStore?.clear();
-    throw describeDiscordActivityLoginError("Discord Activity session restore", error);
-  }
-
-  try {
     await input.establishSession(accessToken);
   } catch (error) {
+    input.tokenStore?.clear();
     throw describeDiscordActivityLoginError("Project Desk Activity session restore", error);
   }
 }

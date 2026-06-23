@@ -69,7 +69,7 @@ test("authorizes, exchanges the code, and authenticates a fresh Activity session
   ]);
 });
 
-test("restores an already-authenticated Activity session from a stored token", async () => {
+test("restores an already-authenticated Activity session from a stored token without reauthenticating Discord", async () => {
   const calls: unknown[] = [];
   const tokenStore = createTokenStore(calls, "stored-token");
 
@@ -83,7 +83,7 @@ test("restores an already-authenticated Activity session from a stored token", a
         },
         authenticate: async (input) => {
           calls.push(["authenticate", input]);
-          return { access_token: "existing-token" };
+          throw { code: 4002, message: "Already authenticated" };
         }
       }
     },
@@ -97,7 +97,6 @@ test("restores an already-authenticated Activity session from a stored token", a
 
   assert.deepEqual(calls, [
     ["readToken"],
-    ["authenticate", { access_token: "stored-token" }],
     ["establishSession", "stored-token"]
   ]);
 });
@@ -134,7 +133,7 @@ test("falls back to normal Discord OAuth when already authenticated without a st
   assert.deepEqual(calls, [["readToken"], ["fallbackLogin"]]);
 });
 
-test("clears a stored token when Activity authentication rejects it", async () => {
+test("clears a stored token when Project Desk session restore rejects it", async () => {
   const calls: unknown[] = [];
   const tokenStore = createTokenStore(calls, "bad-token");
 
@@ -149,7 +148,7 @@ test("clears a stored token when Activity authentication rejects it", async () =
           },
           authenticate: async (input) => {
             calls.push(["authenticate", input]);
-            throw { code: 4009, message: "No access token provided" };
+            throw new Error(`authenticate should not run with ${JSON.stringify(input)}.`);
           }
         }
       },
@@ -158,12 +157,13 @@ test("clears a stored token when Activity authentication rejects it", async () =
       },
       establishSession: async (accessToken) => {
         calls.push(["establishSession", accessToken]);
+        throw new Error("Stored token is stale.");
       }
     }),
-    /Discord Activity session restore failed/
+    /Project Desk Activity session restore failed/
   );
 
-  assert.deepEqual(calls, [["readToken"], ["authenticate", { access_token: "bad-token" }], ["clearToken"]]);
+  assert.deepEqual(calls, [["readToken"], ["establishSession", "bad-token"], ["clearToken"]]);
 });
 
 test("browser token store handles unavailable local storage", () => {
