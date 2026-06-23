@@ -66,6 +66,7 @@ import {
   createWorkItem,
   deleteWorkItemLink,
   deleteWorkItem,
+  establishDiscordActivitySession,
   exchangeDiscordActivityCode,
   getBoard,
   getInbox,
@@ -137,7 +138,7 @@ import type {
   UserProfile,
   WorkStage
 } from "./types";
-import { describeDiscordActivityLoginError, discordActivityAuthScopes } from "./discordActivityAuth";
+import { completeDiscordActivityLogin } from "./discordActivityAuth";
 import { useDiscordActivity, type DiscordActivityState } from "./useDiscordActivity";
 
 const priorityOptions: { value: RequestPriority; label: string }[] = [
@@ -747,35 +748,17 @@ function App() {
       return;
     }
 
-    let code: string;
-
-    try {
-      ({ code } = await discordActivity.sdk.commands.authorize({
-        client_id: publicConfig.discordClientId,
-        response_type: "code",
-        state: "",
-        prompt: "none",
-        scope: [...discordActivityAuthScopes]
-      }));
-    } catch (error) {
-      throw describeDiscordActivityLoginError("Discord Activity authorization", error);
-    }
-
-    let accessToken: string;
-
-    try {
-      ({ accessToken } = await exchangeDiscordActivityCode(code));
-    } catch (error) {
-      throw describeDiscordActivityLoginError("Project Desk Activity token exchange", error);
-    }
-
-    try {
-      await discordActivity.sdk.commands.authenticate({
-        access_token: accessToken
-      });
-    } catch (error) {
-      throw describeDiscordActivityLoginError("Discord Activity authentication", error);
-    }
+    await completeDiscordActivityLogin({
+      clientId: publicConfig.discordClientId,
+      sdk: discordActivity.sdk,
+      exchangeCode: async (code) => {
+        const { accessToken } = await exchangeDiscordActivityCode(code);
+        return { accessToken };
+      },
+      establishSession: async (accessToken) => {
+        await establishDiscordActivitySession(accessToken);
+      }
+    });
     await refreshMe();
   }
 

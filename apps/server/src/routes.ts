@@ -378,9 +378,14 @@ const uploadAttachmentsSchema = z.object({
   files: z.array(uploadFileSchema).min(1).max(8)
 });
 
-const activityAuthSchema = z.object({
-  code: z.string().min(1)
-});
+const activityAuthSchema = z
+  .object({
+    code: z.string().min(1).optional(),
+    accessToken: z.string().min(1).optional()
+  })
+  .refine((value) => Boolean(value.code) !== Boolean(value.accessToken), {
+    message: "Provide exactly one Discord Activity code or access token."
+  });
 
 const updateBoardItemStateSchema = z.object({
   stateId: z.string().trim().min(1)
@@ -2054,11 +2059,11 @@ export function createApp({ plane, discord, aiWorker, ai, taskRunner }: CreateAp
 
   api.post("/auth/discord/activity", async (req, res) => {
     const input = activityAuthSchema.parse(req.body);
-    const token = await exchangeDiscordActivityCode(input.code);
+    const accessToken = input.accessToken ?? (await exchangeDiscordActivityCode(input.code!)).access_token;
     let user: SessionUser;
 
     try {
-      user = await createSessionUser(discord, token.access_token);
+      user = await createSessionUser(discord, accessToken);
     } catch (error) {
       if (sendDiscordAuthError(res, error, "json")) {
         return;
@@ -2070,7 +2075,7 @@ export function createApp({ plane, discord, aiWorker, ai, taskRunner }: CreateAp
     getSession(req).user = user;
 
     res.json({
-      accessToken: token.access_token,
+      accessToken,
       user
     });
   });

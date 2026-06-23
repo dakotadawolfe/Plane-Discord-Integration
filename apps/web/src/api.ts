@@ -108,6 +108,16 @@ export function exchangeDiscordActivityCode(code: string): Promise<{
   });
 }
 
+export function establishDiscordActivitySession(accessToken: string): Promise<{
+  accessToken: string;
+  user: CurrentUser;
+}> {
+  return apiFetch("/api/auth/discord/activity", {
+    method: "POST",
+    body: JSON.stringify({ accessToken })
+  });
+}
+
 export function listWorkItems(): Promise<{ items: WorkItemSummary[] }> {
   return apiFetch<{ items: WorkItemSummary[] }>("/api/work-items");
 }
