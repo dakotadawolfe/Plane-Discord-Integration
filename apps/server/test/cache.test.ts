@@ -1,8 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { preventApiResponseCaching } from "../src/routes.js";
 
-test("API responses are marked no-store", () => {
+function seedConfigEnv(): void {
+  process.env.DISCORD_CLIENT_ID ??= "test-client-id";
+  process.env.DISCORD_CLIENT_SECRET ??= "test-client-secret";
+  process.env.DISCORD_BOT_TOKEN ??= "test-bot-token";
+  process.env.DISCORD_GUILD_ID ??= "test-guild-id";
+  process.env.DISCORD_REQUEST_CHANNEL_ID ??= "test-channel-id";
+  process.env.SESSION_SECRET ??= "test-session-secret-at-least-32-characters";
+}
+
+test("API responses are marked no-store", async () => {
+  seedConfigEnv();
+  const { preventApiResponseCaching } = await import("../src/routes.js");
+
   let nextCalled = false;
   const headers = new Map<string, string>();
 
