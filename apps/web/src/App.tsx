@@ -137,6 +137,7 @@ import type {
   UserProfile,
   WorkStage
 } from "./types";
+import { describeDiscordActivityLoginError, discordActivityAuthScopes } from "./discordActivityAuth";
 import { useDiscordActivity, type DiscordActivityState } from "./useDiscordActivity";
 
 const priorityOptions: { value: RequestPriority; label: string }[] = [
@@ -746,18 +747,35 @@ function App() {
       return;
     }
 
-    const { code } = await discordActivity.sdk.commands.authorize({
-      client_id: publicConfig.discordClientId,
-      response_type: "code",
-      state: "",
-      prompt: "none",
-      scope: ["identify"]
-    });
-    const { accessToken } = await exchangeDiscordActivityCode(code);
+    let code: string;
 
-    await discordActivity.sdk.commands.authenticate({
-      access_token: accessToken
-    });
+    try {
+      ({ code } = await discordActivity.sdk.commands.authorize({
+        client_id: publicConfig.discordClientId,
+        response_type: "code",
+        state: "",
+        prompt: "none",
+        scope: [...discordActivityAuthScopes]
+      }));
+    } catch (error) {
+      throw describeDiscordActivityLoginError("Discord Activity authorization", error);
+    }
+
+    let accessToken: string;
+
+    try {
+      ({ accessToken } = await exchangeDiscordActivityCode(code));
+    } catch (error) {
+      throw describeDiscordActivityLoginError("Project Desk Activity token exchange", error);
+    }
+
+    try {
+      await discordActivity.sdk.commands.authenticate({
+        access_token: accessToken
+      });
+    } catch (error) {
+      throw describeDiscordActivityLoginError("Discord Activity authentication", error);
+    }
     await refreshMe();
   }
 
