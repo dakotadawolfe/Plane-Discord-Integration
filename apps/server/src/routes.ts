@@ -598,6 +598,11 @@ function logClientDiagnostic(input: z.infer<typeof clientDiagnosticSchema>): voi
   console.info(`[project-desk:client] ${input.event} ${JSON.stringify(input)}`);
 }
 
+export function preventApiResponseCaching(_req: Request, res: Response, next: NextFunction): void {
+  res.setHeader("Cache-Control", "no-store");
+  next();
+}
+
 function sanitizeFileName(value: string): string {
   const clean = basename(value)
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
@@ -1982,6 +1987,7 @@ export function createApp({ plane, discord, aiWorker, ai, taskRunner }: CreateAp
   );
 
   const api = express.Router();
+  api.use(preventApiResponseCaching);
 
   function createUploadAttachmentsHandler(urlBase: string) {
     return async (req: Request, res: Response) => {
