@@ -49,6 +49,11 @@ DATABASE_URL=file:/var/lib/project-desk/project-desk.db
 
 AI_PROVIDER=hermes
 AI_WORKER_ENABLED=true
+HERMES_TRANSPORT=cli
+HERMES_CLI_COMMAND=/home/discord/.local/bin/hermes
+HERMES_CLI_PROVIDER=openai-codex
+HERMES_CLI_WORKSPACE_DIR=/opt/project-desk
+HERMES_CLI_TIMEOUT_SECONDS=180
 HERMES_API_BASE_URL=http://127.0.0.1:9119/v1
 HERMES_MODEL=hermes-agent
 
@@ -58,6 +63,7 @@ AI_EXECUTION_WORKSPACE_DIR=/opt/project-desk
 AI_EXECUTION_RUN_DIR=/var/lib/project-desk/ai-runs
 AI_EXECUTION_MAX_CONCURRENCY=5
 AI_EXECUTION_REQUIRE_ADMIN=true
+HERMES_TASK_PROVIDER=openai-codex
 
 LOCAL_CODEX_ENABLED=false
 SOURCE_SYNC_ENABLED=true
@@ -70,7 +76,13 @@ Plane values may remain empty while `DEMO_MODE=true`.
 
 ## Hermes
 
-Hermes should expose its OpenAI-compatible API locally:
+Hermes CLI execution should work without a prompt:
+
+```bash
+/home/discord/.local/bin/hermes chat -q PROJECT_DESK_HERMES_OK --provider openai-codex --accept-hooks --yolo --max-turns 1 --quiet
+```
+
+Hermes proxy is optional when `HERMES_TRANSPORT=cli`. If you later want the OpenAI-compatible API transport, Hermes should expose its proxy locally:
 
 ```bash
 /home/discord/.local/bin/hermes proxy start --provider nous --host 127.0.0.1 --port 9119

@@ -55,6 +55,11 @@ Required variables:
 | `HERMES_API_BASE_URL` | Hermes OpenAI-compatible API base URL, usually `http://127.0.0.1:9119/v1` |
 | `HERMES_API_KEY` | Server-only API key for Hermes, if the API server requires one |
 | `HERMES_MODEL` | Hermes model id, default `hermes-agent` |
+| `HERMES_TRANSPORT` | `api` for Hermes OpenAI-compatible proxy, or `cli` to call `hermes chat` directly |
+| `HERMES_CLI_COMMAND` | Hermes CLI command/path used when `HERMES_TRANSPORT=cli` |
+| `HERMES_CLI_PROVIDER` | Hermes provider for CLI workflow AI, for example `openai-codex` |
+| `HERMES_CLI_WORKSPACE_DIR` | Working directory for Hermes CLI workflow AI |
+| `HERMES_CLI_TIMEOUT_SECONDS` | Hermes CLI workflow AI timeout, default `180` |
 | `AI_EXECUTION_PROVIDER` | `local`, `hermes`, or `disabled`; controls who executes assigned Project Desk AI tasks |
 | `AI_EXECUTION_COMMAND` | CLI command for task execution, usually `codex` locally or `hermes` on the server |
 | `AI_EXECUTION_WORKSPACE_DIR` | Repository/worktree used by AI task execution |
@@ -127,6 +132,16 @@ AI_PROVIDER=hermes
 HERMES_API_BASE_URL=http://127.0.0.1:9119/v1
 HERMES_API_KEY=<server-only-key-if-required>
 HERMES_MODEL=hermes-agent
+```
+
+If Hermes proxy is not available but Hermes CLI already has a working credential, use CLI transport instead:
+
+```text
+AI_PROVIDER=hermes
+HERMES_TRANSPORT=cli
+HERMES_CLI_COMMAND=/home/discord/.local/bin/hermes
+HERMES_CLI_PROVIDER=openai-codex
+HERMES_CLI_WORKSPACE_DIR=/opt/project-desk
 ```
 
 For server-side task execution through Hermes, also set:

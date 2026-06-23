@@ -47,6 +47,11 @@ const optionalAiExecutionProvider = z.preprocess(
   z.enum(["local", "hermes", "disabled"]).optional()
 );
 
+const optionalHermesTransport = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z.enum(["api", "cli"]).optional()
+);
+
 const optionalString = z.preprocess(
   (value) => (value === "" ? undefined : value),
   z.string().optional()
@@ -112,6 +117,11 @@ const envSchema = z
     HERMES_API_BASE_URL: optionalString,
     HERMES_API_KEY: optionalString,
     HERMES_MODEL: optionalString,
+    HERMES_TRANSPORT: optionalHermesTransport,
+    HERMES_CLI_COMMAND: optionalString,
+    HERMES_CLI_PROVIDER: optionalString,
+    HERMES_CLI_WORKSPACE_DIR: optionalString,
+    HERMES_CLI_TIMEOUT_SECONDS: optionalPositiveInteger,
     HERMES_TASK_PROVIDER: optionalString,
     HERMES_TASK_MODEL: optionalString,
     AI_EXECUTION_PROVIDER: optionalAiExecutionProvider,
@@ -275,7 +285,12 @@ export const config = {
     workerEnabled: env.AI_WORKER_ENABLED ? env.AI_WORKER_ENABLED === "true" : true,
     hermesBaseUrl: env.HERMES_API_BASE_URL?.replace(/\/+$/, "") ?? "http://127.0.0.1:9119/v1",
     hermesApiKey: env.HERMES_API_KEY,
-    hermesModel: env.HERMES_MODEL ?? "hermes-agent"
+    hermesModel: env.HERMES_MODEL ?? "hermes-agent",
+    hermesTransport: env.HERMES_TRANSPORT ?? "api",
+    hermesCliCommand: env.HERMES_CLI_COMMAND ?? "hermes",
+    hermesCliProvider: env.HERMES_CLI_PROVIDER ?? env.HERMES_TASK_PROVIDER,
+    hermesCliWorkspaceDir: resolve(repoRoot, env.HERMES_CLI_WORKSPACE_DIR ?? env.AI_EXECUTION_WORKSPACE_DIR ?? "."),
+    hermesCliTimeoutMs: (env.HERMES_CLI_TIMEOUT_SECONDS ?? 180) * 1000
   },
   aiExecution: {
     provider: aiExecutionProvider,

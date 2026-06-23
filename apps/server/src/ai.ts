@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { config } from "./config.js";
 import type { AiArtifactRecord, WorkCommentRecord, WorkItemRecord } from "./db.js";
 import type { AiJobType, RequestPriority } from "./domain.js";
@@ -62,6 +63,27 @@ interface ChatCompletionResponse {
       content?: string | null;
     };
   }>;
+}
+
+interface ProcessResult {
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+}
+
+const maxCapturedHermesOutput = 120_000;
+
+function appendLimited(current: string, chunk: Buffer | string): string {
+  if (current.length >= maxCapturedHermesOutput) {
+    return current;
+  }
+
+  const next = current + chunk.toString();
+  return next.length > maxCapturedHermesOutput
+    ? `${next.slice(0, maxCapturedHermesOutput)}\n\n[output truncated]`
+    : next;
 }
 
 function jobLabel(type: AiJobType): string {
@@ -280,8 +302,35 @@ function parseTitleJson(text: string, fallbackTitle: string): AiTitleSuggestion 
   };
 }
 
+function cliPrompt(system: string, user: string): string {
+  return [
+    "Project Desk is calling you through Hermes CLI.",
+    "Follow the system instructions exactly and return only the requested JSON object.",
+    "Do not run shell commands, inspect local secrets, ask for permission, or reveal credentials.",
+    "",
+    "System instructions:",
+    system,
+    "",
+    "User/context:",
+    user
+  ].join("\n");
+}
+
+function cleanHermesCliContent(value: string): string {
+  return value
+    .split(/\r?\n/)
+    .filter((line) => !/^session_id:\s*/i.test(line.trim()))
+    .join("\n")
+    .trim();
+}
+
 export class HermesAiClient implements AiClient {
   async generate(context: AiContext): Promise<AiResult> {
+    if (config.ai.hermesTransport === "cli") {
+      const content = await this.runHermesCli(cliPrompt(systemPrompt(), userPrompt(context)));
+      return parseAiJson(content, jobLabel(context.jobType));
+    }
+
     const response = await fetch(`${config.ai.hermesBaseUrl}/chat/completions`, {
       method: "POST",
       headers: {
@@ -313,6 +362,11 @@ export class HermesAiClient implements AiClient {
   }
 
   async suggestTitle(context: AiTitleContext): Promise<AiTitleSuggestion> {
+    if (config.ai.hermesTransport === "cli") {
+      const content = await this.runHermesCli(cliPrompt(titleSystemPrompt(), titleUserPrompt(context)));
+      return parseTitleJson(content, context.workItem.title);
+    }
+
     const response = await fetch(`${config.ai.hermesBaseUrl}/chat/completions`, {
       method: "POST",
       headers: {
@@ -341,6 +395,94 @@ export class HermesAiClient implements AiClient {
     }
 
     return parseTitleJson(content, context.workItem.title);
+  }
+
+  private runHermesCli(prompt: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const args = [
+        "chat",
+        "-q",
+        prompt,
+        "--accept-hooks",
+        "--yolo",
+        "--max-turns",
+        "1",
+        "--quiet",
+        "--source",
+        "project-desk"
+      ];
+
+      if (config.ai.hermesCliProvider) {
+        args.push("--provider", config.ai.hermesCliProvider);
+      }
+
+      const child = spawn(config.ai.hermesCliCommand, args, {
+        cwd: config.ai.hermesCliWorkspaceDir,
+        env: {
+          ...process.env,
+          HERMES_ACCEPT_HOOKS: "1",
+          RUST_LOG: process.env.RUST_LOG ?? "error"
+        },
+        windowsHide: true
+      });
+      let stdout = "";
+      let stderr = "";
+      let timedOut = false;
+      let settled = false;
+
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        setTimeout(() => child.kill("SIGKILL"), 5000).unref();
+      }, config.ai.hermesCliTimeoutMs);
+
+      child.stdout?.on("data", (chunk) => {
+        stdout = appendLimited(stdout, chunk);
+      });
+      child.stderr?.on("data", (chunk) => {
+        stderr = appendLimited(stderr, chunk);
+      });
+
+      child.on("error", (error) => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        clearTimeout(timeout);
+        reject(new AiUnavailableError(`Hermes CLI failed to start: ${error.message}`));
+      });
+
+      child.on("close", (exitCode, signal) => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        clearTimeout(timeout);
+        const result: ProcessResult = { exitCode, signal, stdout, stderr, timedOut };
+
+        if (result.timedOut) {
+          reject(new AiUnavailableError("Hermes CLI request timed out."));
+          return;
+        }
+
+        if (result.exitCode !== 0) {
+          const detail = cleanHermesCliContent(result.stderr || result.stdout).slice(0, 500);
+          reject(new AiUnavailableError(`Hermes CLI request failed with ${result.exitCode ?? result.signal ?? "unknown status"}.${detail ? ` ${detail}` : ""}`));
+          return;
+        }
+
+        const content = cleanHermesCliContent(result.stdout);
+
+        if (!content) {
+          reject(new AiUnavailableError("Hermes CLI response did not include content."));
+          return;
+        }
+
+        resolve(content);
+      });
+    });
   }
 }
 
