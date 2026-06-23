@@ -387,6 +387,15 @@ const activityAuthSchema = z
     message: "Provide exactly one Discord Activity code or access token."
   });
 
+const clientDiagnosticSchema = z
+  .object({
+    event: z.string().trim().min(1).max(80),
+    href: z.string().trim().max(500).optional(),
+    userAgent: z.string().trim().max(240).optional(),
+    details: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional().default({})
+  })
+  .strict();
+
 const updateBoardItemStateSchema = z.object({
   stateId: z.string().trim().min(1)
 });
@@ -531,6 +540,62 @@ function routeParam(value: string | string[] | undefined): string | null {
   }
 
   return value ?? null;
+}
+
+function shouldLogRequestPath(path: string): boolean {
+  return (
+    path === "/" ||
+    path === "/api/me" ||
+    path === "/api/public-config" ||
+    path === "/api/client-diagnostics" ||
+    path.startsWith("/api/auth/discord/") ||
+    /^\/assets\/index-[^/]+\.(js|css)$/.test(path)
+  );
+}
+
+function classifyUserAgent(userAgent: string | undefined): string {
+  const value = userAgent ?? "";
+
+  if (/discord/i.test(value) && /iphone|ipad|ios/i.test(value)) {
+    return "discord-ios";
+  }
+
+  if (/discord/i.test(value) && /android/i.test(value)) {
+    return "discord-android";
+  }
+
+  if (/discord/i.test(value)) {
+    return "discord";
+  }
+
+  if (/iphone|ipad|ios/i.test(value)) {
+    return "ios";
+  }
+
+  if (/android/i.test(value)) {
+    return "android";
+  }
+
+  return "browser";
+}
+
+function logObservedRequest(req: Request, res: Response, next: NextFunction): void {
+  if (!shouldLogRequestPath(req.path)) {
+    next();
+    return;
+  }
+
+  const startedAt = Date.now();
+  res.on("finish", () => {
+    console.info(
+      `[project-desk:http] ${req.method} ${req.path} ${res.statusCode} ${Date.now() - startedAt}ms ${classifyUserAgent(req.get("user-agent"))}`
+    );
+  });
+  next();
+}
+
+function logClientDiagnostic(input: z.infer<typeof clientDiagnosticSchema>): void {
+  console.info(`[project-desk:client] ${input.event} ${JSON.stringify(input)}`);
 }
 
 function sanitizeFileName(value: string): string {
@@ -1896,9 +1961,13 @@ export function createApp({ plane, discord, aiWorker, ai, taskRunner }: CreateAp
   app.use(
     helmet({
       contentSecurityPolicy: false,
-      frameguard: false
+      crossOriginOpenerPolicy: false,
+      crossOriginResourcePolicy: false,
+      frameguard: false,
+      originAgentCluster: false
     })
   );
+  app.use(logObservedRequest);
   app.use(express.json({ limit: config.http.requestBodyLimit, verify: captureRawBody }));
   app.use(handleBodyParserError);
   app.use(
@@ -2000,6 +2069,11 @@ export function createApp({ plane, discord, aiWorker, ai, taskRunner }: CreateAp
 
   api.get("/public-config", (_req, res) => {
     res.json({ discordClientId: config.discord.clientId });
+  });
+
+  api.post("/client-diagnostics", (req, res) => {
+    logClientDiagnostic(clientDiagnosticSchema.parse(req.body));
+    res.status(204).send();
   });
 
   api.post(["/uploads", "/upload", "/attachments"], requireAuth, createUploadAttachmentsHandler("/api/uploads"));

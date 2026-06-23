@@ -138,6 +138,7 @@ import type {
   UserProfile,
   WorkStage
 } from "./types";
+import { reportClientDiagnostic } from "./clientDiagnostics";
 import { browserDiscordActivityTokenStore, completeDiscordActivityLogin } from "./discordActivityAuth";
 import { useDiscordActivity, type DiscordActivityState } from "./useDiscordActivity";
 
@@ -745,26 +746,45 @@ function App() {
 
   async function handleLogin() {
     if (!publicConfig?.discordClientId || !discordActivity.embedded || !discordActivity.ready || !discordActivity.sdk) {
+      reportClientDiagnostic("login-browser-redirect", {
+        embedded: discordActivity.embedded,
+        ready: discordActivity.ready,
+        hasSdk: Boolean(discordActivity.sdk)
+      });
       login(window.location.pathname);
       return;
     }
 
-    await completeDiscordActivityLogin({
-      clientId: publicConfig.discordClientId,
-      sdk: discordActivity.sdk,
-      tokenStore: browserDiscordActivityTokenStore,
-      exchangeCode: async (code) => {
-        const { accessToken } = await exchangeDiscordActivityCode(code);
-        return { accessToken };
-      },
-      establishSession: async (accessToken) => {
-        await establishDiscordActivitySession(accessToken);
-      },
-      fallbackLogin: () => {
-        login(window.location.pathname);
-      }
+    reportClientDiagnostic("activity-login-start", {
+      ready: discordActivity.ready
     });
-    await refreshMe();
+
+    try {
+      await completeDiscordActivityLogin({
+        clientId: publicConfig.discordClientId,
+        sdk: discordActivity.sdk,
+        tokenStore: browserDiscordActivityTokenStore,
+        exchangeCode: async (code) => {
+          const { accessToken } = await exchangeDiscordActivityCode(code);
+          return { accessToken };
+        },
+        establishSession: async (accessToken) => {
+          reportClientDiagnostic("activity-login-establish-session");
+          await establishDiscordActivitySession(accessToken);
+        },
+        fallbackLogin: () => {
+          reportClientDiagnostic("activity-login-fallback");
+          login(window.location.pathname);
+        }
+      });
+      reportClientDiagnostic("activity-login-success");
+      await refreshMe();
+    } catch (error) {
+      reportClientDiagnostic("activity-login-error", {
+        message: error instanceof Error ? error.message : error
+      });
+      throw error;
+    }
   }
 
   async function refreshInboxUnreadCount() {
