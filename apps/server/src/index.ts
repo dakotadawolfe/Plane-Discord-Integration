@@ -8,6 +8,7 @@ import { LocalCodexRunner } from "./local-codex-runner.js";
 import { runInactiveArchiveSweep } from "./maintenance.js";
 import { PlaneClient } from "./plane.js";
 import { createApp } from "./routes.js";
+import { closeHttpServer } from "./shutdown.js";
 import { DisabledAiTaskRunner, type AiTaskRunner } from "./task-runner.js";
 
 const discord = new DiscordService();
@@ -43,13 +44,27 @@ function onListening() {
   );
 }
 
+let shuttingDown = false;
+
 async function shutdown() {
+  if (shuttingDown) {
+    return;
+  }
+
+  shuttingDown = true;
   console.log("Shutting down Project Desk.");
   clearInterval(eventHeartbeat);
   clearInterval(inactiveArchiveSweep);
   aiWorker.stop();
   await discord.stop();
-  server.close(() => process.exit(0));
+
+  try {
+    await closeHttpServer(server);
+    process.exit(0);
+  } catch (error) {
+    console.error("Project Desk shutdown failed.", error);
+    process.exit(1);
+  }
 }
 
 process.on("SIGINT", () => {
