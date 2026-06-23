@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 function seedConfigEnv(): void {
+  process.env.DEMO_MODE ??= "true";
   process.env.DISCORD_CLIENT_ID ??= "test-client-id";
   process.env.DISCORD_CLIENT_SECRET ??= "test-client-secret";
   process.env.DISCORD_BOT_TOKEN ??= "test-bot-token";
