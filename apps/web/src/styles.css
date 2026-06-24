@@ -1448,9 +1448,9 @@ a {
 }
 
 .pill.task-status.restart_required {
-  border-color: rgba(221, 105, 105, 0.34);
-  background: rgba(221, 105, 105, 0.14);
-  color: #ef9a9a;
+  border-color: rgba(200, 148, 63, 0.38);
+  background: rgba(200, 148, 63, 0.14);
+  color: #e0b66c;
 }
 
 .form-grid {
@@ -3058,7 +3058,6 @@ a {
 }
 
 .task-row .codex-inline-status.compact {
-  color: var(--accent-strong);
   font-size: 11px;
 }
 
@@ -3117,13 +3116,54 @@ a {
   color: #82d79e;
 }
 
+.codex-inline-status.restart_required {
+  border-color: rgba(200, 148, 63, 0.38);
+  background: rgba(200, 148, 63, 0.14);
+  color: #e0b66c;
+}
+
 .codex-inline-status.failed,
-.codex-inline-status.restart_required,
 .codex-inline-status.timed_out,
 .codex-inline-status.start_failed {
   border-color: rgba(221, 105, 105, 0.34);
   background: rgba(221, 105, 105, 0.14);
   color: #ef9a9a;
+}
+
+.apply-required-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(200, 148, 63, 0.34);
+  border-radius: 8px;
+  background: rgba(200, 148, 63, 0.1);
+}
+
+.apply-required-notice > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.apply-required-notice strong {
+  color: var(--text-strong);
+  font-size: 13px;
+}
+
+.apply-required-notice span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.apply-required-notice .apply-required-error {
+  color: #ef9a9a;
+}
+
+.apply-changes-button {
+  flex: 0 0 auto;
 }
 
 .codex-live-dot {

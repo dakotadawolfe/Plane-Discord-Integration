@@ -123,6 +123,7 @@ import { captureRawBody, handleDiscordInteraction } from "./interactions.js";
 import { runInactiveArchiveSweep } from "./maintenance.js";
 import { PlaneApiError, type PlaneComment, type PlaneLikeClient, type PlaneWorkItem } from "./plane.js";
 import { getSourceSyncStatus, startSourceSync, type SourceSyncAction } from "./source-sync.js";
+import { sourceSyncActions } from "./source-sync-actions.js";
 import type { AiTaskRunner } from "./task-runner.js";
 
 interface AppSession {
@@ -494,8 +495,6 @@ const enqueueAiJobSchema = z.object({
   type: z.enum(aiJobTypes),
   reason: z.string().trim().max(500).optional()
 });
-
-const sourceSyncActions = ["pull", "push", "restart"] as const satisfies readonly SourceSyncAction[];
 
 function getSession(req: Request): AppSession {
   if (!req.session) {

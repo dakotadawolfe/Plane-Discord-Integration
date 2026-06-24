@@ -139,6 +139,7 @@ import type {
   WorkStage
 } from "./types";
 import { reportClientDiagnostic } from "./clientDiagnostics";
+import { codexInlineStatusDisplay, taskNeedsApply } from "./codexStatusDisplay";
 import {
   browserDiscordActivityTokenStore,
   browserProjectDeskActivitySessionTokenStore,
@@ -648,7 +649,7 @@ function isActiveCodexStatus(status: LocalCodexRunStatus | undefined): boolean {
 }
 
 function isRestartRequiredCodexStatus(status: LocalCodexRunStatus | undefined): boolean {
-  return status === "restart_required";
+  return taskNeedsApply(status);
 }
 
 function isSucceededCodexStatus(status: LocalCodexRunStatus | undefined): boolean {
@@ -1805,6 +1806,9 @@ function SourceSyncPanel({
         </button>
         <button className="secondary-button" type="button" disabled={disabled} onClick={() => onRun("restart")}>
           <RefreshCw size={16} /> Restart app
+        </button>
+        <button className="secondary-button" type="button" disabled={disabled} onClick={() => onRun("apply")}>
+          <RefreshCw size={16} /> Build + restart
         </button>
       </div>
       {status?.message ? <p className={`source-sync-message ${status.state}`}>{status.message}</p> : null}
@@ -4082,10 +4086,18 @@ function DetailHierarchy({ item, parentItem }: { item: WorkItemDetail; parentIte
 function TaskList({
   items,
   saving,
+  canApplyChanges,
+  applyDisabled,
+  applyRunning,
+  onApplyChanges,
   onUpdateTask
 }: {
   items: WorkItemSummary[];
   saving: boolean;
+  canApplyChanges: boolean;
+  applyDisabled: boolean;
+  applyRunning: boolean;
+  onApplyChanges: () => Promise<void>;
   onUpdateTask: (itemId: string, taskStatus: TaskStatus, completionReason?: TaskCompletionReason | null) => Promise<void>;
 }) {
   const [reasons, setReasons] = useState<Record<string, TaskCompletionReason>>({});
@@ -4140,6 +4152,7 @@ function TaskList({
         const codexActive = isActiveCodexStatus(codexStatus);
         const codexRestartRequired = isRestartRequiredCodexStatus(codexStatus);
         const codexSucceeded = isSucceededCodexStatus(codexStatus);
+        const codexDisplay = codexStatus ? codexInlineStatusDisplay(codexStatus) : null;
 
         return (
           <article className="task-row" key={task.id}>
@@ -4157,14 +4170,23 @@ function TaskList({
                 {codexActive || codexRestartRequired ? (
                   <span className={`codex-inline-status compact ${codexStatus}`}>
                     {codexActive ? <span className="codex-live-dot" aria-hidden="true" /> : null}
-                    {codexRestartRequired ? "Restart npm" : "AI working"}
+                    {codexDisplay?.label ?? "AI working"}
                   </span>
                 ) : null}
-                {codexSucceeded ? <span className="codex-inline-status succeeded">AI complete</span> : null}
+                {codexSucceeded && codexDisplay ? <span className="codex-inline-status succeeded">{codexDisplay.label}</span> : null}
               </span>
             </div>
             <div className="task-row-actions">
               <TaskStatusPill item={task} codexStatus={codexStatus} />
+              {codexRestartRequired && canApplyChanges ? (
+                <ApplyChangesButton
+                  compact
+                  canApplyChanges={canApplyChanges}
+                  disabled={applyDisabled}
+                  running={applyRunning}
+                  onApplyChanges={onApplyChanges}
+                />
+              ) : null}
               {taskStatusOptions.map((option) => (
                 <button
                   className={task.taskStatus === option.value ? "primary-button compact-button" : "secondary-button compact-button"}
@@ -4197,6 +4219,61 @@ function TaskList({
           </article>
         );
       })}
+    </div>
+  );
+}
+
+function ApplyChangesButton({
+  canApplyChanges,
+  disabled,
+  running,
+  compact = false,
+  onApplyChanges
+}: {
+  canApplyChanges: boolean;
+  disabled: boolean;
+  running: boolean;
+  compact?: boolean;
+  onApplyChanges: () => Promise<void>;
+}) {
+  const className = compact ? "secondary-button compact-button apply-changes-button" : "primary-button apply-changes-button";
+  const disabledReason = !canApplyChanges ? "Administrator role required to apply app changes" : "Build and restart Project Desk";
+
+  return (
+    <button
+      className={className}
+      type="button"
+      disabled={disabled || !canApplyChanges}
+      onClick={() => void onApplyChanges()}
+      title={disabledReason}
+    >
+      <RefreshCw size={compact ? 14 : 16} className={running ? "spin" : undefined} />
+      {running ? "Applying" : canApplyChanges ? "Apply changes" : "Administrator required"}
+    </button>
+  );
+}
+
+function ApplyRequiredNotice({
+  canApplyChanges,
+  disabled,
+  running,
+  error,
+  onApplyChanges
+}: {
+  canApplyChanges: boolean;
+  disabled: boolean;
+  running: boolean;
+  error: string | null;
+  onApplyChanges: () => Promise<void>;
+}) {
+  return (
+    <div className="apply-required-notice">
+      <div>
+        <strong>Apply required</strong>
+        <span>AI changed app code. Build Project Desk and restart the service before the app reflects this task.</span>
+        {error ? <span className="apply-required-error">{error}</span> : null}
+      </div>
+      <ApplyChangesButton canApplyChanges={canApplyChanges} disabled={disabled} running={running} onApplyChanges={onApplyChanges} />
     </div>
   );
 }
@@ -4505,6 +4582,9 @@ function WorkItemDetailPage({
   const [codexOutputOpen, setCodexOutputOpen] = useState(false);
   const [codexHeaderSnapshot, setCodexHeaderSnapshot] = useState<LocalCodexRunSnapshot | null>(null);
   const [codexHeaderError, setCodexHeaderError] = useState(false);
+  const [sourceSyncStatus, setSourceSyncStatus] = useState<SourceSyncStatus | null>(null);
+  const [sourceSyncError, setSourceSyncError] = useState<string | null>(null);
+  const [sourceSyncAction, setSourceSyncAction] = useState<SourceSyncAction | null>(null);
   const [taskCompletionReason, setTaskCompletionReason] = useState<TaskCompletionReason>("done");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -4526,6 +4606,11 @@ function WorkItemDetailPage({
   const codexHeaderActiveStatus = codexHeaderStatus && isActiveCodexStatus(codexHeaderStatus) ? codexHeaderStatus : null;
   const codexHeaderRestartRequiredStatus =
     codexHeaderStatus && isRestartRequiredCodexStatus(codexHeaderStatus) ? codexHeaderStatus : null;
+  const sourceSyncRunning = Boolean(sourceSyncStatus?.running || sourceSyncAction);
+  const sourceSyncApplyRunning = sourceSyncRunning && (sourceSyncStatus?.action === "apply" || sourceSyncAction === "apply");
+  const sourceSyncEnabled = sourceSyncStatus?.enabled !== false;
+  const canApplyChanges = Boolean(user?.isAdmin && sourceSyncEnabled);
+  const applyChangesDisabled = saving || sourceSyncRunning || !sourceSyncEnabled;
 
   useEffect(() => {
     if (!user || !id) {
@@ -4573,6 +4658,39 @@ function WorkItemDetailPage({
       window.clearInterval(poll);
     };
   }, [item?.id, item?.kind]);
+
+  useEffect(() => {
+    if (!user?.isAdmin) {
+      setSourceSyncStatus(null);
+      setSourceSyncError(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const refreshSourceSyncStatus = async () => {
+      try {
+        const payload = await getSourceSyncStatus();
+
+        if (!cancelled) {
+          setSourceSyncStatus(payload.sync);
+          setSourceSyncError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setSourceSyncError(err instanceof ApiError ? err.message : "Could not load apply status.");
+        }
+      }
+    };
+
+    void refreshSourceSyncStatus();
+    const timer = window.setInterval(() => void refreshSourceSyncStatus(), sourceSyncStatus?.running ? 2000 : 6000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [user?.isAdmin, sourceSyncStatus?.running]);
 
   useEffect(() => {
     if (!user || !id || !item || loading) {
@@ -5063,6 +5181,25 @@ function WorkItemDetailPage({
     }
   }
 
+  async function applySourceChanges() {
+    if (!user?.isAdmin) {
+      setError("Administrator role required to apply app changes.");
+      return;
+    }
+
+    setSourceSyncAction("apply");
+    setSourceSyncError(null);
+
+    try {
+      const payload = await startSourceSync("apply");
+      setSourceSyncStatus(payload.sync);
+    } catch (err) {
+      setSourceSyncError(err instanceof ApiError ? err.message : "Could not apply app changes.");
+    } finally {
+      setSourceSyncAction(null);
+    }
+  }
+
   if (!user) {
     return <LoginPanel onLogin={onLogin} activity={activity} />;
   }
@@ -5245,7 +5382,9 @@ function WorkItemDetailPage({
               </span>
             ) : null}
             {codexHeaderRestartRequiredStatus ? (
-              <span className={`codex-inline-status compact ${codexHeaderRestartRequiredStatus}`}>Restart npm</span>
+              <span className={`codex-inline-status compact ${codexHeaderRestartRequiredStatus}`}>
+                {codexInlineStatusDisplay(codexHeaderRestartRequiredStatus).label}
+              </span>
             ) : null}
             {taskStatusOptions.map((option) => (
               <button
@@ -5271,6 +5410,15 @@ function WorkItemDetailPage({
               ))}
             </select>
           </div>
+          {codexHeaderRestartRequiredStatus ? (
+            <ApplyRequiredNotice
+              canApplyChanges={canApplyChanges}
+              disabled={applyChangesDisabled}
+              running={sourceSyncApplyRunning}
+              error={sourceSyncError}
+              onApplyChanges={applySourceChanges}
+            />
+          ) : null}
           {codexOutputOpen ? <LocalCodexOutputPanel taskId={item.id} /> : null}
         </section>
       ) : null}
@@ -5287,7 +5435,15 @@ function WorkItemDetailPage({
               </button>
             }
           />
-          <TaskList items={childItems} saving={saving} onUpdateTask={updateTask} />
+          <TaskList
+            items={childItems}
+            saving={saving}
+            canApplyChanges={canApplyChanges}
+            applyDisabled={applyChangesDisabled}
+            applyRunning={sourceSyncApplyRunning}
+            onApplyChanges={applySourceChanges}
+            onUpdateTask={updateTask}
+          />
         </section>
       ) : null}
 
@@ -6279,7 +6435,7 @@ function localCodexStatusLabel(status: LocalCodexRunStatus) {
     queued: "Queued",
     running: "Running",
     succeeded: "Complete",
-    restart_required: "Restart npm",
+    restart_required: "Apply required",
     failed: "Failed",
     timed_out: "Timed out",
     start_failed: "Failed to start"
@@ -6294,12 +6450,12 @@ function CodexRunBadge({ snapshot, error }: { snapshot: LocalCodexRunSnapshot | 
   }
 
   const status = snapshot?.status ?? "idle";
-  const label = snapshot ? localCodexStatusLabel(status) : "Checking";
+  const label = snapshot ? codexInlineStatusDisplay(status).label : "Checking";
 
   return (
     <span className={`codex-inline-status ${status}`}>
       {status === "queued" || status === "running" ? <span className="codex-live-dot" aria-hidden="true" /> : null}
-      AI {label.toLowerCase()}
+      {label}
     </span>
   );
 }
@@ -7195,7 +7351,7 @@ function TaskStatusPill({
   codexStatus?: LocalCodexRunStatus;
 }) {
   if (isRestartRequiredCodexStatus(codexStatus)) {
-    return <span className="pill task-status restart_required">Restart npm</span>;
+    return <span className="pill task-status restart_required">Apply required</span>;
   }
 
   if (!item.taskStatus) {

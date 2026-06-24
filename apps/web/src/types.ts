@@ -343,7 +343,7 @@ export type LocalCodexRunStatus = AiTaskRunStatus;
 export type LocalCodexOutputEntry = AiTaskOutputEntry;
 export type LocalCodexRunSnapshot = AiTaskRunSnapshot;
 
-export type SourceSyncAction = "pull" | "push" | "restart";
+export type SourceSyncAction = "pull" | "push" | "restart" | "apply";
 export type SourceSyncState = "idle" | "running" | "succeeded" | "failed";
 
 export interface SourceSyncStatus {

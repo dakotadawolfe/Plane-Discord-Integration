@@ -159,6 +159,17 @@ sudo -n systemctl restart project-desk
 
 If either command prompts for a password, the web app cannot be 100 percent autonomous for restarts/source sync.
 
+## Source Sync And Apply
+
+Admin settings exposes app-code-only source sync actions:
+
+- `Sync from GitHub`: fast-forwards `/opt/project-desk`, runs `npm ci`, builds, and restarts Project Desk.
+- `Sync app to GitHub`: stages the allowlisted app/docs files, rejects forbidden paths or secret-looking diffs, typechecks, builds, commits, and pushes.
+- `Restart app`: schedules a Project Desk service restart without rebuilding.
+- `Build + restart`: runs `npm run build`, then schedules a Project Desk service restart.
+
+AI task runs that modify server-sensitive app files can finish as `Apply required`. In that state, administrators see an `Apply changes` button on the task page and on the parent project/idea task row. That button uses the same `Build + restart` source-sync action. Non-admin users see the apply-required warning but cannot trigger the restart.
+
 ## Source Sync
 
 The admin settings Source Sync buttons run on the server:

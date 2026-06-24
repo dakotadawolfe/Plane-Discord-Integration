@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { config } from "./config.js";
+import { sourceSyncSuccessMessage, type SourceSyncAction } from "./source-sync-actions.js";
 
-export type SourceSyncAction = "pull" | "push" | "restart";
+export type { SourceSyncAction } from "./source-sync-actions.js";
 export type SourceSyncState = "idle" | "running" | "succeeded" | "failed";
 
 export interface SourceSyncStatus {
@@ -210,19 +211,24 @@ async function runRestart(): Promise<void> {
   await scheduleProjectDeskRestart();
 }
 
+async function runApply(): Promise<void> {
+  await npm(["run", "build"]);
+  await scheduleProjectDeskRestart();
+}
+
 async function executeSourceSync(action: SourceSyncAction, actorName: string): Promise<void> {
   try {
     if (action === "pull") {
       await runPull();
-      currentStatus.message = "Synced app code from GitHub and restarted Project Desk.";
     } else if (action === "push") {
       await runPush(actorName);
-      currentStatus.message = "Synced safe app code changes to GitHub.";
-    } else {
+    } else if (action === "restart") {
       await runRestart();
-      currentStatus.message = "Restarted Project Desk.";
+    } else {
+      await runApply();
     }
 
+    currentStatus.message = sourceSyncSuccessMessage(action);
     currentStatus.state = "succeeded";
   } catch (error) {
     currentStatus.state = "failed";
